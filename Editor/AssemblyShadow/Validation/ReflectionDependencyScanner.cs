@@ -65,7 +65,10 @@ namespace HybridCLR.Editor.AssemblyShadow
             { definition.unknownReflectionDependencies = true; return; }
             var evidence = new List<ReflectionDependencyEvidence>();
             var acquisitions = new List<ManagedAcquisitionEvidence>();
-            var assemblyBindings = verifiedBindings.Where(binding => binding.Assembly == assemblyName).ToArray();
+            // Loader dictionary keys are canonical, while verified configuration
+            // identities retain their original case. Match using the same rule.
+            string canonicalAssembly = AssemblyIdentityUtil.CanonicalName(assemblyName);
+            var assemblyBindings = verifiedBindings.Where(binding => AssemblyIdentityUtil.CanonicalName(binding.Assembly) == canonicalAssembly).ToArray();
             var guardedSites = assemblyBindings.ToDictionary(binding => binding.OriginalMethod);
             var fixedGuards = assemblyBindings.Where(binding => binding.Kind == "FixedAssemblyBytes")
                 .ToDictionary(binding => binding.GuardMethod);
@@ -127,7 +130,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                             bool bound = acquisitionKind == "Assembly.LoadBytes" && fixedGuards.TryGetValue(method, out binding);
                             binding = bound ? fixedGuards[method] : null;
                             acquisitions.Add(Acquisition(method, called, callSite, index, acquisitionKind,
-                                acquisitionKind != "AppDomain.GetAssemblies", binding));
+                                !IsHandleOnlyAcquisition(acquisitionKind), binding));
                             if (binding != null)
                                 evidence.Add(new ReflectionDependencyEvidence { callSite = binding.TypeName + "::" + binding.OriginalMethod.Name,
                                     target = binding.ImageSha256, provider = binding.Providers.Single(), kind = "FixedAssemblyBytes" });
@@ -180,12 +183,44 @@ namespace HybridCLR.Editor.AssemblyShadow
             string owner = method.DeclaringType.FullName, name = method.Name.String;
             if (owner == "System.AppDomain" && name == "GetAssemblies") return "AppDomain.GetAssemblies";
             if (owner == "System.AppDomain" && name == "Load") return "AppDomain.Load";
+            if (owner == "System.Reflection.Module")
+            {
+                // Member and attribute metadata can expose declaring/attribute
+                // types just as directly as a type enumeration or token lookup.
+                // These operations have no supported finite contract yet.
+                switch (name)
+                {
+                    case "GetTypes": case "GetType": case "FindTypes":
+                    case "ResolveType": case "ResolveMember": case "ResolveMethod": case "ResolveField":
+                    case "GetMethod": case "GetMethods": case "GetField": case "GetFields":
+                    case "GetCustomAttributes": case "GetCustomAttributesData": case "get_CustomAttributes":
+                    case "get_ModuleHandle": case "get_Assembly":
+                        return "Module." + name;
+                }
+            }
+            if (owner == "System.ModuleHandle")
+            {
+                switch (name)
+                {
+                    case "ResolveTypeHandle": case "ResolveMethodHandle": case "ResolveFieldHandle":
+                    case "GetRuntimeTypeHandleFromMetadataToken": case "GetRuntimeMethodHandleFromMetadataToken": case "GetRuntimeFieldHandleFromMetadataToken":
+                        return "ModuleHandle." + name;
+                }
+            }
             if (owner != "System.Reflection.Assembly") return null;
+            if (name == "GetModule" || name == "GetModules" || name == "GetLoadedModules" || name == "get_Modules" || name == "get_ManifestModule") return "Assembly." + name;
             if (name == "GetTypes" || name == "GetExportedTypes" || name == "get_DefinedTypes" || name == "get_ExportedTypes") return "Assembly." + name;
             if (name == "Load" && method.MethodSig.Params.Count > 0 && method.MethodSig.Params[0].FullName == "System.Byte[]") return "Assembly.LoadBytes";
             // Other acquisition entrypoints are not string-name dependencies.
             if (name == "LoadFrom" || name == "LoadFile" || name == "UnsafeLoadFrom" || name == "ReflectionOnlyLoad" || name == "ReflectionOnlyLoadFrom") return "Assembly." + name;
             return null;
+        }
+
+        private static bool IsHandleOnlyAcquisition(string kind)
+        {
+            return kind == "AppDomain.GetAssemblies" || kind == "Assembly.GetModule" || kind == "Assembly.GetModules" ||
+                kind == "Assembly.GetLoadedModules" || kind == "Assembly.get_Modules" || kind == "Assembly.get_ManifestModule" ||
+                kind == "Module.get_ModuleHandle" || kind == "Module.get_Assembly";
         }
 
         private static State[] Analyze(MethodDef method, IDictionary<MethodDef, VerifiedReflectionBinding> fixedGuards)

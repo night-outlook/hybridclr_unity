@@ -93,6 +93,81 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
         }
 
+        [Test] public void RealLoaderCanonicalKeysRetainVerifiedFixedGuardAndReceiverProvenance()
+        {
+            using (var fixture = Fixture.Create("Load", true))
+            {
+                fixture.Configure("FixedAssemblyBytes"); fixture.Transform(); fixture.LoadThroughRealLoader();
+                CollectionAssert.Contains(fixture.Set.Assemblies.Keys, "consumer");
+                Assert.AreEqual("Consumer", fixture.Configuration.sites[0].assembly);
+                var result = fixture.Validate(fixture.Configuration, fixture.Images());
+                Assert.IsTrue(result.IsValid, result.ToString());
+                StringAssert.Contains("UnboundedManagedAcquisition", fixture.Validate().ToString());
+            }
+        }
+
+        [Test] public void ModuleTypeAndTokenAcquisitionsRejectDirectAndIndirectCalls()
+        {
+            foreach (string name in new[] { "GetTypes", "GetType", "FindTypes", "ResolveType", "ResolveMember", "ResolveMethod", "ResolveField",
+                "GetMethod", "GetMethods", "GetField", "GetFields", "GetCustomAttributes", "GetCustomAttributesData", "get_CustomAttributes" })
+            foreach (bool indirect in new[] { false, true })
+            using (var fixture = Fixture.Create("GetTypes"))
+            {
+                fixture.ReplaceWithMetadataCall(typeof(System.Reflection.Module), name, indirect);
+                var acquisition = fixture.Scan().managedAcquisitions.Single();
+                Assert.AreEqual(indirect ? "IndirectAcquisition" : "Module." + name, acquisition.kind);
+                Assert.IsTrue(acquisition.requiresContract); Assert.IsFalse(acquisition.verified);
+                fixture.Policy.dependencies.runtimeDependencies = new[] { new DeclaredRuntimeDependency { consumer = "Consumer", provider = "Image",
+                    callSite = "Fixture.Host::Run", kind = "intended module", evidence = "Caller claims this module is safe" } };
+                StringAssert.Contains("UnboundedManagedAcquisition", fixture.Validate().ToString());
+            }
+        }
+
+        [Test] public void ModuleHandleTokenResolversCannotBypassModuleAcquisitionChecks()
+        {
+            foreach (string name in new[] { "ResolveTypeHandle", "ResolveMethodHandle", "ResolveFieldHandle",
+                "GetRuntimeTypeHandleFromMetadataToken", "GetRuntimeMethodHandleFromMetadataToken", "GetRuntimeFieldHandleFromMetadataToken" })
+            foreach (bool indirect in new[] { false, true })
+            using (var fixture = Fixture.Create("GetTypes"))
+            {
+                fixture.ReplaceWithMetadataCall(typeof(ModuleHandle), name, indirect);
+                StringAssert.Contains("UnboundedManagedAcquisition", fixture.Validate().ToString());
+                Assert.IsTrue(fixture.Scan().managedAcquisitions.Single().requiresContract);
+            }
+        }
+
+        [Test] public void ModuleIdentityAndRawMetadataQueriesDoNotClaimTypeAcquisition()
+        {
+            foreach (string name in new[] { "get_Name", "get_ModuleVersionId", "ResolveString", "ResolveSignature" })
+            using (var fixture = Fixture.Create("GetTypes"))
+            {
+                fixture.ReplaceWithMetadataCall(typeof(System.Reflection.Module), name, false);
+                Assert.IsEmpty(fixture.Scan().managedAcquisitions);
+                Assert.IsTrue(fixture.Validate().IsValid, fixture.Validate().ToString());
+            }
+        }
+
+        [Test] public void RealLoaderAssemblyToModuleEnumerationChainFailsAtTypeAcquisition()
+        {
+            using (var fixture = Fixture.Create("GetAssemblies"))
+            {
+                var module = fixture.Set.GetModule("Consumer"); var method = module.GetTypes().SelectMany(type => type.Methods).Single();
+                var importer = new Importer(module); var il = method.Body.Instructions; il.RemoveAt(il.Count - 1);
+                il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref));
+                il.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(Assembly).GetMethod("GetModules", Type.EmptyTypes))));
+                il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref));
+                il.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(System.Reflection.Module).GetMethod("GetTypes", Type.EmptyTypes))));
+                il.Add(Instruction.Create(OpCodes.Pop)); il.Add(Instruction.Create(OpCodes.Ret)); method.MethodSig.RetType = module.CorLibTypes.Void;
+                fixture.SaveConsumer(); fixture.LoadThroughRealLoader();
+                var evidence = fixture.Scan().managedAcquisitions;
+                Assert.AreEqual(3, evidence.Length);
+                Assert.IsFalse(evidence.Single(item => item.kind == "AppDomain.GetAssemblies").requiresContract);
+                Assert.IsFalse(evidence.Single(item => item.kind == "Assembly.GetModules").requiresContract);
+                Assert.IsTrue(evidence.Single(item => item.kind == "Module.GetTypes").requiresContract);
+                StringAssert.Contains("UnboundedManagedAcquisition", fixture.Validate().ToString());
+            }
+        }
+
         [Test] public void FiniteAnchorsRequirePhysicalIdentityAndCannotIncludeCandidatesBootstrapOrHotUpdate()
         {
             foreach (string operation in new[] { "GetAssemblies", "GetTypes" })
@@ -133,6 +208,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             internal CompiledAssemblySet Set;
             internal ShadowPolicyConfiguration Policy = new ShadowPolicyConfiguration();
             internal ReflectionBindingConfiguration Configuration;
+            private string loaderRoot;
             internal Dictionary<string, byte[]> Images() { return new Dictionary<string, byte[]> { { Configuration.sites[0].imagePath, ImageBytes } }; }
             internal ShadowPolicyValidationResult Validate(ReflectionBindingConfiguration configuration = null, IReadOnlyDictionary<string, byte[]> images = null)
             { return ShadowAssemblyPolicyValidator.ValidateCompiled(Set, Policy, DateTime.UtcNow, configuration, images); }
@@ -162,6 +238,35 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             {
                 ConsumerBytes = ReflectionBindingTransformer.Transform(ConsumerBytes, null, Configuration).PeData;
                 Set.Dispose(); Set = CreateSet(ConsumerBytes, ImageBytes);
+            }
+            internal void SaveConsumer()
+            { using (var stream = new MemoryStream()) { Set.GetModule("Consumer").Write(stream); ConsumerBytes = stream.ToArray(); } }
+            internal void LoadThroughRealLoader()
+            {
+                loaderRoot = Path.Combine(Path.GetTempPath(), "AssemblyShadow-AcquisitionLoader-" + Guid.NewGuid().ToString("N"));
+                string assemblies = Path.Combine(loaderRoot, "Assemblies"), references = Path.Combine(loaderRoot, "References");
+                Directory.CreateDirectory(assemblies); Directory.CreateDirectory(references);
+                File.WriteAllBytes(Path.Combine(assemblies, "Consumer.dll"), ConsumerBytes); File.WriteAllBytes(Path.Combine(assemblies, "Image.dll"), ImageBytes);
+                File.Copy(typeof(object).Assembly.Location, Path.Combine(references, "mscorlib.dll"));
+                var capabilities = new[] { new AssemblyCapability { name = "Consumer" }, new AssemblyCapability { name = "Image", classification = AssemblyClassification.NormalHotUpdate } };
+                Set.Dispose(); Set = DnlibAssemblyLoader.Load(assemblies, new[] { references }, capabilities);
+            }
+            internal void ReplaceWithMetadataCall(Type owner, string name, bool indirect)
+            {
+                var module = Set.GetModule("Consumer"); var method = module.GetTypes().SelectMany(type => type.Methods).Single();
+                var reflection = owner.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+                    .Where(candidate => candidate.Name == name).OrderBy(candidate => candidate.GetParameters().Length).First();
+                var target = new Importer(module).Import(reflection); var il = method.Body.Instructions; il.Clear();
+                method.MethodSig = MethodSig.CreateStatic(module.CorLibTypes.Void, owner.IsValueType ? (TypeSig)new ValueTypeSig(target.DeclaringType) : new ClassSig(target.DeclaringType));
+                if (indirect) il.Add(Instruction.Create(OpCodes.Ldftn, target));
+                else
+                {
+                    il.Add(owner.IsValueType ? Instruction.Create(OpCodes.Ldarga_S, method.Parameters[0]) : Instruction.Create(OpCodes.Ldarg_0));
+                    foreach (var parameter in target.MethodSig.Params)
+                        il.Add(parameter.ElementType == ElementType.I4 || parameter.ElementType == ElementType.Boolean ? Instruction.Create(OpCodes.Ldc_I4_0) : Instruction.Create(OpCodes.Ldnull));
+                    il.Add(Instruction.Create(owner.IsValueType ? OpCodes.Call : OpCodes.Callvirt, target));
+                }
+                il.Add(Instruction.Create(OpCodes.Pop)); il.Add(Instruction.Create(OpCodes.Ret));
             }
             internal static Fixture Create(string operation, bool getTypeAfterLoad = false)
             {
@@ -199,7 +304,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 var constructor = typeof(CompiledAssemblySet).GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single();
                 return (CompiledAssemblySet)constructor.Invoke(new object[] { descriptors, modules, new Resolver(new AssemblyResolver()), new string[0] });
             }
-            public void Dispose() { Set.Dispose(); }
+            public void Dispose() { Set.Dispose(); if (loaderRoot != null && Directory.Exists(loaderRoot)) Directory.Delete(loaderRoot, true); }
         }
     }
 }
