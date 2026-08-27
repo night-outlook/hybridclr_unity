@@ -14,6 +14,34 @@ namespace HybridCLR
     [Preserve]
     public static class RuntimeApi
     {
+        // M01 feasibility-only API. One Internal shadow per process; no rollback,
+        // unload, usage guard or production transaction is implied by "Load".
+#if UNITY_EDITOR || !ENABLE_IL2CPP
+        public static Assembly LoadAssemblyShadowPrototype(byte[] dll, byte[] pdb)
+            => throw new NotSupportedException("Assembly Shadow requires the native IL2CPP prototype.");
+        public static bool ActivateAssemblyShadowPrototype(string assemblyName)
+            => throw new NotSupportedException("Assembly Shadow requires the native IL2CPP prototype.");
+        public static string GetAssemblyShadowPrototypeDiagnostics() => "{\"enabled\":false,\"active\":false}";
+        public static string InspectAssemblyShadowPrototypeObject(object instance)
+            => throw new NotSupportedException("Physical native object inspection requires IL2CPP.");
+        public static string InspectAssemblyShadowPrototypeAssembly(Assembly assembly)
+            => throw new NotSupportedException("Physical native assembly inspection requires IL2CPP.");
+        public static void SetAssemblyShadowPrototypePhase(string phase) { }
+#else
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        public static extern Assembly LoadAssemblyShadowPrototype(byte[] dll, byte[] pdb);
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        public static extern bool ActivateAssemblyShadowPrototype(string assemblyName);
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        public static extern string GetAssemblyShadowPrototypeDiagnostics();
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        public static extern string InspectAssemblyShadowPrototypeObject(object instance);
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        public static extern string InspectAssemblyShadowPrototypeAssembly(Assembly assembly);
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        public static extern void SetAssemblyShadowPrototypePhase(string phase);
+#endif
+
         /// <summary>
         /// load supplementary metadata assembly
         /// </summary>
