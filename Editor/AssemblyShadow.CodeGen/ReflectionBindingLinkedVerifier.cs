@@ -29,15 +29,12 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 BindingChecks.Require(operation.OpCode.Code == Code.Call && guard != null && guard.DeclaringType == original.DeclaringType &&
                     guard.Name == GuardName(site, configHash), "MissingGuardedSite", site.id);
                 BindingChecks.Require(expectedGuards.Add(guard), "AmbiguousGuard", site.id);
-                BindingChecks.Require(original.Body.Instructions.All(instruction => !IsAnyTypeLookup(instruction.Operand as IMethod)), "AdditionalLookup", site.id);
+                BindingChecks.Require(original.Body.Instructions.All(instruction => !IsSiteAcquisition(instruction.Operand as IMethod, site)), "AdditionalLookup", site.id);
 
                 // Independently reconstruct the entire immutable guard in the
                 // linked corlib scope, before comparing with the compiler guard.
                 BindingChecks.Require(guard.HasBody && guard.MethodSig != null && guard.MethodSig.Params.Count == 1, "GuardTemplateMismatch", site.id);
-                var returnType = guard.MethodSig.RetType.ToTypeDefOrRef();
-                BindingChecks.Require(returnType != null, "GuardTemplateMismatch", site.id);
-                var lookup = new MemberRefUser(linked, "GetType", MethodSig.CreateStatic(guard.MethodSig.RetType, guard.MethodSig.Params[0]), returnType);
-                BindingChecks.Require(IsExactTypeLookup(lookup, linked), "GuardTemplateMismatch", site.id);
+                var lookup = OriginalAcquisition(linked, site, guard);
                 var expected = CreateGuard(linked, site, configHash, lookup);
                 string linkedGuardHash = ReflectionBindingFingerprint.Compute(guard);
                 BindingChecks.Require(linkedGuardHash == ReflectionBindingFingerprint.Shape(expected, original.DeclaringType.FullName, -1, null), "GuardTemplateMismatch", site.id);
@@ -56,6 +53,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 result.Add(new VerifiedReflectionBinding { SiteId = source.SiteId, Assembly = source.Assembly, TypeName = source.TypeName,
                     MethodSignature = source.MethodSignature, OperationIndex = source.OperationIndex, OriginalMethod = original, GuardMethod = guard,
                     ConfigurationHash = source.ConfigurationHash, AllowedTypes = source.AllowedTypes, Providers = source.Providers,
+                    Kind = source.Kind, ImageSha256 = source.ImageSha256, ProviderAssemblyIdentity = source.ProviderAssemblyIdentity, ImagePath = source.ImagePath,
                     LinkedProfileHash = profile.ComputeHash(), CompiledMethodHash = ReflectionBindingFingerprint.Compute(source.OriginalMethod),
                     LinkedMethodHash = linkedMethodHash, CompiledGuardHash = ReflectionBindingFingerprint.Compute(source.GuardMethod), LinkedGuardHash = linkedGuardHash });
             }

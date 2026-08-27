@@ -298,7 +298,10 @@ namespace HybridCLR.Editor.AssemblyShadow
             string path;
             try
             {
-                path = ResolveProjectPath(customPath ? configuredPath : fallbackPath);
+                // Keep the configured spelling when supplied.  Replacing it with
+                // the fallback after a case-insensitive comparison can select a
+                // permissive default on case-sensitive filesystems.
+                path = ResolveProjectPath(string.IsNullOrWhiteSpace(configuredPath) ? fallbackPath : configuredPath);
             }
             catch (ShadowBuildException)
             {
@@ -347,11 +350,11 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             try
             {
-                return string.Equals(ResolveProjectPath(left), ResolveProjectPath(right), StringComparison.OrdinalIgnoreCase);
+                return string.Equals(ResolveProjectPath(left), ResolveProjectPath(right), StringComparison.Ordinal);
             }
             catch (Exception)
             {
-                return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+                return string.Equals(left, right, StringComparison.Ordinal);
             }
         }
 

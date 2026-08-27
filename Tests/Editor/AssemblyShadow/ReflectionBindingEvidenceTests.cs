@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.Serialization.Json;
+using dnlib.DotNet;
 using HybridCLR.AssemblyShadow.CodeGen;
 using NUnit.Framework;
 
@@ -144,6 +145,113 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 ShadowReflectionBindingEvidence.CompilationDefines(new[] { define }));
 
             Assert.That(error.Code, Is.EqualTo("ReservedCompilerDefine"));
+        }
+
+        [Test]
+        public void FixedImageDeclarationAddsProviderWithoutATypeAnchor()
+        {
+            using (var fixture = new FixedImageFixture())
+            {
+                var policy = new ShadowPolicyConfiguration();
+                ShadowReflectionBindingEvidence.Declare(policy, Serialize(fixture.Configuration));
+                ShadowReflectionBindingEvidence.AddCompiledDependencies(policy, new[] { A("Consumer"), A("NormalHotUpdate") });
+                var declaration = policy.reflectionBindings.Single();
+                Assert.That(declaration.kind, Is.EqualTo("FixedAssemblyBytes"));
+                Assert.That(declaration.allowedTypes, Is.Empty);
+                Assert.That(declaration.providers, Is.EquivalentTo(new[] { AssemblyIdentityUtil.CanonicalName("NormalHotUpdate") }));
+                Assert.That(policy.dependencies.runtimeDependencies.Single().callSite, Is.Null);
+            }
+        }
+
+        [Test]
+        public void FixedImageReaderUsesCapturedBytesNotProjectSourcePath()
+        {
+            using (var fixture = new FixedImageFixture())
+            {
+                var images = ShadowReflectionBindingEvidence.ReadFixedImages(fixture.Root, fixture.Configuration);
+                CollectionAssert.AreEqual(fixture.Payload, images[fixture.Configuration.sites[0].imagePath]);
+                Assert.That(File.Exists(fixture.Configuration.sites[0].imagePath), Is.False,
+                    "The fixture intentionally has no live project source file.");
+            }
+        }
+
+        [Test]
+        public void FixedImageReaderRejectsTamperedAndMissingCapturedBytes()
+        {
+            using (var fixture = new FixedImageFixture())
+            {
+                byte[] changed = (byte[])fixture.Payload.Clone();
+                changed[changed.Length / 2] ^= 1;
+                File.WriteAllBytes(fixture.ImagePath, changed);
+                Assert.Throws<ReflectionBindingException>(() => ShadowReflectionBindingEvidence.ReadFixedImages(fixture.Root, fixture.Configuration));
+                File.Delete(fixture.ImagePath);
+                var missing = Assert.Throws<ShadowBuildException>(() => ShadowReflectionBindingEvidence.ReadFixedImages(fixture.Root, fixture.Configuration));
+                Assert.That(missing.Code, Is.EqualTo("FixedAssemblyImageMissing"));
+            }
+        }
+
+        [Test]
+        public void FixedImageReaderRejectsAHashValidForeignProviderIdentity()
+        {
+            using (var fixture = new FixedImageFixture())
+            {
+                fixture.Configuration.sites[0].providerAssemblyIdentity =
+                    "ForeignProvider, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null";
+                Assert.Throws<ReflectionBindingException>(() => ShadowReflectionBindingEvidence.ReadFixedImages(fixture.Root, fixture.Configuration));
+            }
+        }
+
+        [Test]
+        public void FixedImageSnapshotPathRejectsNonHashPathInput()
+        {
+            Assert.Throws<ShadowBuildException>(() => ShadowReflectionBindingEvidence.FixedImageSnapshotPath("../outside"));
+        }
+
+        private sealed class FixedImageFixture : IDisposable
+        {
+            public readonly string Root;
+            public readonly string ImagePath;
+            public readonly byte[] Payload;
+            public readonly ReflectionBindingConfiguration Configuration;
+
+            public FixedImageFixture()
+            {
+                Root = Path.Combine(Path.GetTempPath(), "ShadowFixedImageEvidence-" + Guid.NewGuid().ToString("N"));
+                var module = new ModuleDefUser("NormalHotUpdate.dll") { Kind = ModuleKind.Dll };
+                var assembly = new AssemblyDefUser("NormalHotUpdate", new Version(1, 0, 0, 0));
+                assembly.Modules.Add(module);
+                using (var stream = new MemoryStream()) { module.Write(stream); Payload = stream.ToArray(); }
+                string identity = assembly.FullName;
+                module.Dispose();
+                string hash = ShadowHash.Bytes(Payload);
+                Configuration = new ReflectionBindingConfiguration
+                {
+                    schemaVersion = 2, transformerVersion = 2,
+                    sites = new[] { new ReflectionBindingSite
+                    {
+                        id = "fixed-image-fixture", assembly = "Consumer", typeName = "Fixture.Host",
+                        methodSignature = "System.Reflection.Assembly Fixture.Host::Load(System.Byte[])",
+                        originalMethodHash = new string('0', 64), operationIndex = 1,
+                        allowedTypes = new string[0], reason = "Captured fixed-image evidence regression.",
+                        kind = "FixedAssemblyBytes", imageSha256 = hash, providerAssemblyIdentity = identity,
+                        imagePath = "Assets/MissingFixedImageFixture-" + Guid.NewGuid().ToString("N") + ".dll.bytes",
+                    } },
+                };
+                ImagePath = Path.Combine(Root, ShadowReflectionBindingEvidence.FixedImageSnapshotPath(hash));
+                Directory.CreateDirectory(Path.GetDirectoryName(ImagePath));
+                File.WriteAllBytes(ImagePath, Payload);
+            }
+
+            public void Dispose() { if (Directory.Exists(Root)) Directory.Delete(Root, true); }
+        }
+
+        private static byte[] Serialize(ReflectionBindingConfiguration configuration)
+        {
+            using (var stream = new MemoryStream())
+            {
+                new DataContractJsonSerializer(typeof(ReflectionBindingConfiguration)).WriteObject(stream, configuration);
+                return stream.ToArray();
+            }
         }
 
         private static AssemblyDescriptor A(string name, params string[] references)

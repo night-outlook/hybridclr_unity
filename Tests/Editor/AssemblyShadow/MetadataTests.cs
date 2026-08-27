@@ -423,7 +423,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 {
                     module.Types.Add(new TypeDefUser("Fixture", "OrdinaryType"));
                     module.ExportedTypes.Add(new ExportedTypeUser(module, 0, "Fixture", "Optional",
-                        TypeAttributes.Public | TypeAttributes.Forwarder, new AssemblyRefUser("Fixture.Facade")));
+                        TypeAttributes.Public | TypeAttributes.Forwarder, new AssemblyRefUser("Fixture.Facade", new Version(1, 0, 0, 0))));
                 });
                 fixture.WriteConsumer("Bridge", "Optional");
                 ShadowBuildException error = Assert.Throws<ShadowBuildException>(() => fixture.Load());
@@ -444,7 +444,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                     "Nested", TypeAttributes.NestedPublic, module.ExportedTypes[0])));
                 fixture.WriteAssembly(fixture.Snapshot, "Consumer", module =>
                 {
-                    var outer = new TypeRefUser(module, "Fixture", "Present", new AssemblyRefUser("Fixture.Facade"));
+                    var outer = new TypeRefUser(module, "Fixture", "Present", new AssemblyRefUser("Fixture.Facade", new Version(1, 0, 0, 0)));
                     module.Types.Add(new TypeDefUser("Fixture", "ConsumerType", new TypeRefUser(module, string.Empty, "Nested", outer)));
                 });
                 using (CompiledAssemblySet set = fixture.Load())

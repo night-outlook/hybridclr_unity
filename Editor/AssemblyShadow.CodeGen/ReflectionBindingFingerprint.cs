@@ -21,7 +21,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
 
         // Only linked-output comparison supplies a scope map. The compiler/config
         // fingerprint continues to use exactly the original byte encoding.
-        internal static string Shape(MethodDef method, string owner, int replacementIndex, IMethod replacement, Func<ITypeDefOrRef, string> linkedScope)
+        internal static string Shape(MethodDef method, string owner, int replacementIndex, IMethod replacement, Func<ITypeDefOrRef, string> linkedScope, Code? replacementCode = null)
         {
             BindingChecks.Require(method != null && method.HasBody && !string.IsNullOrEmpty(owner), "InvalidMethod", "A managed method body is required.");
             BindingChecks.Require(!method.HasImplMap && !method.HasDeclSecurities && !method.HasOverrides, "UnsupportedMethod", "Native, security and override metadata require a newer fingerprint format.");
@@ -51,7 +51,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 hash.Add(body.Instructions.Count);
                 for (int index = 0; index < body.Instructions.Count; index++)
                 {
-                    var instruction = body.Instructions[index]; string code = instruction.OpCode.Code.ToString();
+                    var instruction = body.Instructions[index]; string code = (index == replacementIndex && replacementCode.HasValue ? replacementCode.Value : instruction.OpCode.Code).ToString();
                     if (instruction.IsLdcI4()) { hash.Add("Ldc_I4"); hash.Add(instruction.GetLdcI4Value()); continue; }
                     if (code.StartsWith("Ldarg", StringComparison.Ordinal) || code.StartsWith("Starg", StringComparison.Ordinal))
                     {

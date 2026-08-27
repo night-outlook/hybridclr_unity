@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
+using HybridCLR.AssemblyShadow.CodeGen;
 
 namespace HybridCLR.Editor.AssemblyShadow
 {
@@ -54,11 +55,20 @@ namespace HybridCLR.Editor.AssemblyShadow
         }
 
         internal static void Scan(IReadOnlyDictionary<string, ModuleDefMD> modules, string assemblyName, AssemblyPolicyDefinition definition)
+        { ScanVerified(modules, assemblyName, definition, new VerifiedReflectionBinding[0]); }
+
+        internal static void ScanVerified(IReadOnlyDictionary<string, ModuleDefMD> modules, string assemblyName, AssemblyPolicyDefinition definition,
+            IEnumerable<VerifiedReflectionBinding> verifiedBindings)
         {
             ModuleDefMD module;
             if (modules == null || !modules.TryGetValue(assemblyName, out module))
             { definition.unknownReflectionDependencies = true; return; }
             var evidence = new List<ReflectionDependencyEvidence>();
+            var acquisitions = new List<ManagedAcquisitionEvidence>();
+            var assemblyBindings = verifiedBindings.Where(binding => binding.Assembly == assemblyName).ToArray();
+            var guardedSites = assemblyBindings.ToDictionary(binding => binding.OriginalMethod);
+            var fixedGuards = assemblyBindings.Where(binding => binding.Kind == "FixedAssemblyBytes")
+                .ToDictionary(binding => binding.GuardMethod);
             var unknown = new HashSet<string>(StringComparer.Ordinal);
             var staticReferences = new HashSet<string>(definition.references ?? new string[0], StringComparer.OrdinalIgnoreCase);
             var stateMachines = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -83,7 +93,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                     string callSite = type.FullName + "::" + method.Name;
                     string original;
                     if (method.Name == "MoveNext" && stateMachines.TryGetValue(type.FullName, out original)) callSite = original;
-                    State[] states = Analyze(method);
+                    State[] states = Analyze(method, fixedGuards);
                     for (int index = 0; index < method.Body.Instructions.Count; ++index)
                     {
                         Instruction instruction = method.Body.Instructions[index];
@@ -97,24 +107,51 @@ namespace HybridCLR.Editor.AssemblyShadow
                             }
                         }
                         IMethod called = instruction.Operand as IMethod;
-                        if (called == null || (instruction.OpCode.Code != Code.Call && instruction.OpCode.Code != Code.Callvirt)) continue;
+                        if (called == null) continue;
+                        if (instruction.OpCode.Code == Code.Ldftn || instruction.OpCode.Code == Code.Ldvirtftn)
+                        {
+                            string indirectKind; int indirectArgument;
+                            string acquisition = AcquisitionKind(called);
+                            if (acquisition != null || IsReflectionCall(called, out indirectKind, out indirectArgument))
+                                acquisitions.Add(Acquisition(method, called, callSite, index, "IndirectAcquisition", true, null));
+                            continue;
+                        }
+                        if (instruction.OpCode.Code != Code.Call && instruction.OpCode.Code != Code.Callvirt) continue;
+                        VerifiedReflectionBinding guardedSite;
+                        if (guardedSites.TryGetValue(method, out guardedSite) && index == guardedSite.OperationIndex)
+                            acquisitions.Add(Acquisition(method, called, callSite, index, guardedSite.Kind, true, guardedSite));
+                        string acquisitionKind = AcquisitionKind(called);
+                        if (acquisitionKind != null)
+                        {
+                            VerifiedReflectionBinding binding;
+                            bool bound = acquisitionKind == "Assembly.LoadBytes" && fixedGuards.TryGetValue(method, out binding);
+                            binding = bound ? fixedGuards[method] : null;
+                            acquisitions.Add(Acquisition(method, called, callSite, index, acquisitionKind,
+                                acquisitionKind != "AppDomain.GetAssemblies", binding));
+                            if (binding != null)
+                                evidence.Add(new ReflectionDependencyEvidence { callSite = binding.TypeName + "::" + binding.OriginalMethod.Name,
+                                    target = binding.ImageSha256, provider = binding.Providers.Single(), kind = "FixedAssemblyBytes" });
+                            // Handle enumeration is recorded, not claimed as type acquisition.
+                            // Type enumeration and image loads require exact generated proof.
+                            continue;
+                        }
                         string kind;
                         int argumentIndex;
                         if (!IsReflectionCall(called, out kind, out argumentIndex)) continue;
                         State input = states[index];
                         Value argument = Argument(input, called, argumentIndex);
                         if (argument == null || argument.kind != "string" || string.IsNullOrWhiteSpace(argument.text))
-                        { unknown.Add(callSite); continue; }
+                        { unknown.Add(callSite); acquisitions.Add(Acquisition(method, called, callSite, index, kind, true, null)); continue; }
                         string provider = null, typeName = null;
                         if (kind == "Assembly.Load") provider = AssemblySimpleName(argument.text);
                         else
                         {
                             Value receiver = Receiver(input, called);
                             string requiredAssembly = kind == "Assembly.GetType" && receiver != null && receiver.kind == "assembly" ? receiver.assembly : null;
-                            if (kind == "Assembly.GetType" && requiredAssembly == null) { unknown.Add(callSite); continue; }
+                            if (kind == "Assembly.GetType" && requiredAssembly == null) { unknown.Add(callSite); acquisitions.Add(Acquisition(method, called, callSite, index, kind, true, null)); continue; }
                             ResolveType(modules, argument.text, requiredAssembly, kind == "GetComponent", out provider, out typeName);
                         }
-                        if (provider == null || !modules.ContainsKey(provider)) { unknown.Add(callSite); continue; }
+                        if (provider == null || !modules.ContainsKey(provider)) { unknown.Add(callSite); acquisitions.Add(Acquisition(method, called, callSite, index, kind, true, null)); continue; }
                         evidence.Add(new ReflectionDependencyEvidence { callSite = callSite, target = argument.text,
                             provider = provider, typeName = typeName, kind = kind });
                     }
@@ -124,9 +161,34 @@ namespace HybridCLR.Editor.AssemblyShadow
             definition.reflectionDependencies = evidence.GroupBy(item => item.callSite + "\n" + item.kind + "\n" + item.target + "\n" + item.provider)
                 .Select(group => group.First()).ToArray();
             definition.unknownReflectionCallSites = unknown.OrderBy(value => value, StringComparer.Ordinal).ToArray();
+            definition.managedAcquisitions = acquisitions.ToArray();
         }
 
-        private static State[] Analyze(MethodDef method)
+        private static ManagedAcquisitionEvidence Acquisition(MethodDef method, IMethod called, string callSite, int index,
+            string kind, bool requiresContract, VerifiedReflectionBinding binding)
+        {
+            return new ManagedAcquisitionEvidence { kind = kind, callSite = callSite,
+                methodSignature = ReflectionBindingFingerprint.MethodSignature(method), methodHash = ReflectionBindingFingerprint.Compute(method),
+                operationIndex = index, operationSignature = called.FullName, requiresContract = requiresContract,
+                verified = binding != null, configurationHash = binding == null ? null : binding.ConfigurationHash,
+                siteId = binding == null ? null : binding.SiteId, provider = binding == null || binding.Providers.Length != 1 ? null : binding.Providers[0] };
+        }
+
+        private static string AcquisitionKind(IMethod method)
+        {
+            if (method.DeclaringType == null || method.MethodSig == null) return null;
+            string owner = method.DeclaringType.FullName, name = method.Name.String;
+            if (owner == "System.AppDomain" && name == "GetAssemblies") return "AppDomain.GetAssemblies";
+            if (owner == "System.AppDomain" && name == "Load") return "AppDomain.Load";
+            if (owner != "System.Reflection.Assembly") return null;
+            if (name == "GetTypes" || name == "GetExportedTypes" || name == "get_DefinedTypes" || name == "get_ExportedTypes") return "Assembly." + name;
+            if (name == "Load" && method.MethodSig.Params.Count > 0 && method.MethodSig.Params[0].FullName == "System.Byte[]") return "Assembly.LoadBytes";
+            // Other acquisition entrypoints are not string-name dependencies.
+            if (name == "LoadFrom" || name == "LoadFile" || name == "UnsafeLoadFrom" || name == "ReflectionOnlyLoad" || name == "ReflectionOnlyLoadFrom") return "Assembly." + name;
+            return null;
+        }
+
+        private static State[] Analyze(MethodDef method, IDictionary<MethodDef, VerifiedReflectionBinding> fixedGuards)
         {
             IList<Instruction> instructions = method.Body.Instructions;
             var indices = new Dictionary<Instruction, int>();
@@ -152,7 +214,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 int index = pending.Dequeue();
                 State output = inputs[index].Copy();
                 Instruction instruction = instructions[index];
-                Execute(instruction, output);
+                Execute(instruction, output, fixedGuards);
                 FlowControl flow = instruction.OpCode.FlowControl;
                 Instruction target = instruction.Operand as Instruction;
                 if (target != null && (flow == FlowControl.Branch || flow == FlowControl.Cond_Branch)) offer(indices[target], output);
@@ -163,7 +225,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             return inputs;
         }
 
-        private static void Execute(Instruction instruction, State state)
+        private static void Execute(Instruction instruction, State state, IDictionary<MethodDef, VerifiedReflectionBinding> fixedGuards)
         {
             Code code = instruction.OpCode.Code;
             if (code == Code.Ldstr) { state.stack.Add(Value.String(instruction.Operand as string)); return; }
@@ -195,7 +257,9 @@ namespace HybridCLR.Editor.AssemblyShadow
                 Value receiver = method.MethodSig.HasThis && code != Code.Newobj ? state.Pop() : null;
                 Value value = null;
                 string owner = method.DeclaringType.FullName;
-                if (owner == "System.Reflection.Assembly" && method.Name == "Load" && args.Length >= 1 && args[0] != null && args[0].kind == "string")
+                VerifiedReflectionBinding bound;
+                if (method is MethodDef && fixedGuards.TryGetValue((MethodDef)method, out bound)) value = Value.Assembly(bound.Providers.Single());
+                else if (owner == "System.Reflection.Assembly" && method.Name == "Load" && args.Length >= 1 && args[0] != null && args[0].kind == "string")
                     value = Value.Assembly(AssemblySimpleName(args[0].text));
                 else if (owner == "System.Type" && method.Name == "GetTypeFromHandle" && args.Length == 1 && args[0] != null && args[0].kind == "type") value = args[0];
                 else if (owner == "System.Type" && method.Name == "get_Assembly" && receiver != null && receiver.kind == "type") value = Value.Assembly(receiver.assembly);
@@ -248,8 +312,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             else if (owner == "System.Reflection.Assembly" && name == "GetType" && parameter >= 0) kind = "Assembly.GetType";
             else if (owner == "System.Reflection.Assembly" && name == "Load")
             {
-                // Byte-array loading is not an assembly-name lookup. It belongs
-                // to the loading pipeline, not reflection-string dependency policy.
+                // Byte arrays are tracked separately as typed acquisition evidence.
                 if (method.MethodSig.Params.Count > 0 && method.MethodSig.Params[0].FullName == "System.Byte[]") return false;
                 kind = "Assembly.Load";
             }

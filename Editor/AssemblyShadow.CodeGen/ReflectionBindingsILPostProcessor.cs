@@ -44,6 +44,10 @@ namespace HybridCLR.AssemblyShadow.CodeGen
             BindingChecks.Require(BindingChecks.Sha256(bytes) == rawHash, "BindingConfigurationHashMismatch", "The control define does not identify the current raw configuration bytes.");
             var configuration = ReflectionBindingConfiguration.Parse(bytes);
             if (!configuration.Targets(assemblyName)) return null;
+            var images = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            foreach (var site in configuration.sites.Where(value => ReflectionBindingConfiguration.KindOf(value) == "FixedAssemblyBytes"))
+                if (!images.ContainsKey(site.imagePath)) images.Add(site.imagePath, File.ReadAllBytes(Path.Combine(projectRoot, site.imagePath)));
+            configuration.ValidateImageEvidence(images);
             return ReflectionBindingTransformer.Transform(pe, pdb, configuration);
         }
     }

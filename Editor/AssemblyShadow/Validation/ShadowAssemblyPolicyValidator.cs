@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
+using HybridCLR.AssemblyShadow.CodeGen;
 using UnityEditor;
 using UnityEditor.Compilation;
 using PackageInfo = UnityEditor.PackageManager.PackageInfo;
@@ -27,6 +28,7 @@ namespace HybridCLR.Editor.AssemblyShadow
         public string[] reflectionReferences = new string[0];
         public string[] unknownReflectionCallSites = new string[0];
         public ReflectionDependencyEvidence[] reflectionDependencies = new ReflectionDependencyEvidence[0];
+        public ManagedAcquisitionEvidence[] managedAcquisitions = new ManagedAcquisitionEvidence[0];
         public string sourcePath;
     }
 
@@ -42,6 +44,15 @@ namespace HybridCLR.Editor.AssemblyShadow
         public string provider;
         public string typeName;
         public string kind;
+    }
+
+    [Serializable]
+    public sealed class ManagedAcquisitionEvidence
+    {
+        public string kind, callSite, methodSignature, methodHash, operationSignature;
+        public int operationIndex;
+        public bool requiresContract, verified;
+        public string configurationHash, siteId, provider;
     }
 
     [Serializable]
@@ -71,7 +82,8 @@ namespace HybridCLR.Editor.AssemblyShadow
     public static class ShadowAssemblyPolicyValidator
     {
         public static ShadowPolicyValidationResult ValidateCompiled(CompiledAssemblySet set,
-            ShadowPolicyConfiguration policy, DateTime utcNow)
+            ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration = null,
+            IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null)
         {
             if (set == null)
             {
@@ -79,11 +91,13 @@ namespace HybridCLR.Editor.AssemblyShadow
                 missing.Error("MissingCompiledSet", "CompiledAssemblySet is required for compiled policy validation.");
                 return missing;
             }
+            var bindingErrors = new ShadowPolicyValidationResult();
+            var bindings = VerifyAcquisitions(set, policy, acquisitionConfiguration, fixedImageEvidence, bindingErrors);
             var definitions = new List<AssemblyPolicyDefinition>();
             foreach (KeyValuePair<string, AssemblyDescriptor> pair in set.Assemblies)
             {
                 AssemblyPolicyDefinition definition = FromDescriptor(pair.Value);
-                if (IsRuntime(definition)) ReflectionDependencyScanner.Scan(set.Modules, pair.Key, definition);
+                if (IsRuntime(definition)) ReflectionDependencyScanner.ScanVerified(set.Modules, pair.Key, definition, bindings);
                 definitions.Add(definition);
             }
             // Resolver modules are evidence for references, not missing Player
@@ -103,7 +117,78 @@ namespace HybridCLR.Editor.AssemblyShadow
                     isBootstrap = capability != null && capability.isBootstrap,
                 });
             }
-            return ValidateDefinitions(definitions, policy, utcNow);
+            var result = ValidateDefinitions(definitions, policy, utcNow);
+            foreach (var error in bindingErrors.Diagnostics) result.Error(error.code, error.message);
+            return result;
+        }
+
+        private static VerifiedReflectionBinding[] VerifyAcquisitions(CompiledAssemblySet set, ShadowPolicyConfiguration policy,
+            ReflectionBindingConfiguration configuration, IReadOnlyDictionary<string, byte[]> images, ShadowPolicyValidationResult result)
+        {
+            var verified = new List<VerifiedReflectionBinding>();
+            if (configuration == null)
+            {
+                if (policy != null && (!string.IsNullOrEmpty(policy.reflectionBindingConfigurationHash) ||
+                    !string.IsNullOrEmpty(policy.reflectionBindingConfigurationSha256)))
+                    result.Error("MissingManagedAcquisitionConfiguration", "The pinned reflection/acquisition configuration must be supplied to compiled validation.");
+                return verified.ToArray();
+            }
+            try
+            {
+                configuration.Validate(); configuration.ValidateImageEvidence(images);
+                if (policy != null && !string.IsNullOrEmpty(policy.reflectionBindingConfigurationHash) &&
+                    policy.reflectionBindingConfigurationHash != configuration.ComputeHash())
+                    throw new ReflectionBindingException("AcquisitionConfigurationMismatch", "Policy and supplied configuration hashes differ.");
+                foreach (var group in configuration.sites.GroupBy(site => site.assembly, StringComparer.Ordinal))
+                {
+                    ModuleDefMD module;
+                    if (!set.Modules.TryGetValue(group.Key, out module))
+                        throw new ReflectionBindingException("AcquisitionConsumerMissing", group.Key);
+                    verified.AddRange(ReflectionBindingTransformer.Verify(module, configuration));
+                }
+                foreach (var binding in verified)
+                {
+                    if (binding.Kind == "FixedAssemblyBytes")
+                    {
+                        string provider = binding.Providers.Single(); AssemblyDescriptor descriptor;
+                        var declared = FindCapability(policy, provider);
+                        if (!set.Assemblies.TryGetValue(provider, out descriptor) || descriptor.classification != AssemblyClassification.NormalHotUpdate ||
+                            descriptor.isShadowCapable || descriptor.isBootstrap || (declared != null &&
+                                (declared.classification != AssemblyClassification.NormalHotUpdate || declared.isShadowCapable || declared.isBootstrap)))
+                            throw new ReflectionBindingException("InvalidFixedImageProvider", binding.SiteId + ": expected actual ordinary hot-update input " + provider);
+                        using (var image = ModuleDefMD.Load(images[binding.ImagePath], new ModuleCreationOptions { TryToLoadPdbFromDisk = false }))
+                        {
+                            if (set.GetModule(provider).Assembly.FullName != binding.ProviderAssemblyIdentity ||
+                                AssemblySemanticHasher.Compute(image).semanticHash != AssemblySemanticHasher.Compute(set.GetModule(provider)).semanticHash)
+                                throw new ReflectionBindingException("FixedImageSemanticMismatch", binding.SiteId);
+                        }
+                    }
+                    else if (binding.Kind == "FiniteAssemblyList" || binding.Kind == "FiniteAssemblyTypes")
+                    {
+                        foreach (string aqn in binding.AllowedTypes)
+                        {
+                            string provider = ReflectionBindingConfiguration.ProviderOf(aqn); ModuleDefMD physical;
+                            AssemblyDescriptor descriptor; var capability = FindCapability(policy, provider);
+                            bool actual = set.Assemblies.TryGetValue(provider, out descriptor);
+                            var classification = actual ? descriptor.classification : capability == null ? AssemblyClassification.Reference : capability.classification;
+                            bool controlled = (actual && (descriptor.isBootstrap || descriptor.isShadowCapable)) ||
+                                (capability != null && (capability.isBootstrap || capability.isShadowCapable || capability.classification != classification));
+                            int comma = aqn.IndexOf(',');
+                            if (controlled || (classification != AssemblyClassification.Runtime && classification != AssemblyClassification.Reference) ||
+                                (!actual && classification != AssemblyClassification.Reference) || !set.Modules.TryGetValue(provider, out physical) ||
+                                physical.Assembly.FullName != aqn.Substring(comma + 2) ||
+                                !physical.GetTypes().Any(type => type.FullName == aqn.Substring(0, comma).Replace('+', '/') && !type.HasGenericParameters))
+                                throw new ReflectionBindingException("InvalidFiniteAcquisitionProvider", binding.SiteId + ": " + aqn);
+                        }
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                // No partially verified contract is usable after any evidence failure.
+                verified.Clear(); result.Error("InvalidManagedAcquisitionContract", error.Message);
+            }
+            return verified.ToArray();
         }
 
         public static ShadowPolicyValidationResult ValidateDefinitions(IEnumerable<AssemblyPolicyDefinition> definitions,
@@ -303,6 +388,11 @@ namespace HybridCLR.Editor.AssemblyShadow
             IDictionary<string, AssemblyPolicyDefinition> byName, DateTime utcNow, ShadowPolicyValidationResult result)
         {
             if (!consumer.entersPlayer || !IsRuntime(consumer)) return;
+            foreach (var acquisition in consumer.managedAcquisitions ?? new ManagedAcquisitionEvidence[0])
+                if (acquisition.requiresContract && !acquisition.verified)
+                    result.Error("UnboundedManagedAcquisition", consumer.name + " " + acquisition.kind + " at " + acquisition.methodSignature +
+                        " operation " + acquisition.operationIndex + " [" + acquisition.methodHash + "] calls " + acquisition.operationSignature +
+                        "; method-level prose cannot authorize this operation.");
             if (consumer.unknownReflectionDependencies && policy.rejectUnknownReflectionDependencies)
                 result.Error("UnknownReflectionDependency", consumer.name + " contains dynamic/unknown reflection dependencies.");
             foreach (string callSite in consumer.unknownReflectionCallSites ?? new string[0])

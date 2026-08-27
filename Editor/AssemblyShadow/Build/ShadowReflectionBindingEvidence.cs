@@ -19,6 +19,10 @@ namespace HybridCLR.Editor.AssemblyShadow
         public string[] allowedTypes;
         public string[] providers;
         public string reason;
+        public string kind;
+        public string imageSha256;
+        public string providerAssemblyIdentity;
+        public string imagePath;
     }
 
     // The control define is part of Unity's compiler cache key and the existing
@@ -46,6 +50,13 @@ namespace HybridCLR.Editor.AssemblyShadow
             string ignored;
             ReflectionBindingDefines.TryGetEnabledHash(defines, out ignored);
             return defines.Where(value => !IsControlDefine(value)).ToArray();
+        }
+
+        public static void ValidateProjectImages()
+        {
+            string path = ReflectionBindingConfiguration.ProjectRelativePath;
+            ShadowHash.Require(File.Exists(path), "ReflectionBindingConfigurationMissing", path);
+            ReadProjectImages(Parse(File.ReadAllBytes(path)));
         }
 
         public static ShadowPolicyConfiguration DeclareProject(ShadowPolicyConfiguration policy)
@@ -107,8 +118,15 @@ namespace HybridCLR.Editor.AssemblyShadow
             byte[] bytes = File.ReadAllBytes(path);
             ShadowHash.Require(ShadowHash.Bytes(bytes) == expectedHash, "ReflectionBindingConfigurationChanged", "Configuration changed during compilation.");
             var configuration = Parse(bytes);
-            VerifyInputs(root, receipt, configuration, false);
             Directory.CreateDirectory(Path.Combine(root, DirectoryName));
+            var images = ReadProjectImages(configuration);
+            foreach (var site in FixedImageSites(configuration))
+            {
+                string destination = ShadowHash.SafeChild(root, FixedImageSnapshotPath(site.imageSha256));
+                Directory.CreateDirectory(Path.GetDirectoryName(destination));
+                File.WriteAllBytes(destination, images[site.imagePath]);
+            }
+            VerifyInputs(root, receipt, configuration, false);
             File.WriteAllBytes(ShadowHash.SafeChild(root, ConfigurationPath), bytes);
         }
 
@@ -126,7 +144,12 @@ namespace HybridCLR.Editor.AssemblyShadow
             }
             string path = ShadowHash.SafeChild(root, ConfigurationPath);
             ShadowHash.Require(File.Exists(path), "ReflectionBindingConfigurationMissing", path);
+            byte[] bytes = File.ReadAllBytes(path);
+            ShadowHash.Require(ShadowHash.Bytes(bytes) == expectedHash, "ReflectionBindingConfigurationChanged", path);
+            var configuration = Parse(bytes);
             var expected = new HashSet<string>(StringComparer.Ordinal) { Path.GetFullPath(path) };
+            foreach (var site in FixedImageSites(configuration))
+                expected.Add(ShadowHash.SafeChild(root, FixedImageSnapshotPath(site.imageSha256)));
             if (requireLinked)
             {
                 expected.Add(ShadowHash.SafeChild(root, ShadowReflectionBindingLinkedEvidence.ReceiptPath));
@@ -134,9 +157,6 @@ namespace HybridCLR.Editor.AssemblyShadow
             }
             ShadowHash.Require(expected.SetEquals(Directory.GetFiles(Path.Combine(root, DirectoryName), "*", SearchOption.AllDirectories).Select(Path.GetFullPath)),
                 "UnexpectedReflectionBindingEvidence", "Binding evidence contains undeclared or missing files.");
-            byte[] bytes = File.ReadAllBytes(path);
-            ShadowHash.Require(ShadowHash.Bytes(bytes) == expectedHash, "ReflectionBindingConfigurationChanged", path);
-            var configuration = Parse(bytes);
             VerifyInputs(root, receipt, configuration, requireLinked);
             return configuration;
         }
@@ -155,16 +175,75 @@ namespace HybridCLR.Editor.AssemblyShadow
                 "ReflectionBindingPolicyMismatch", "Declared reflection bindings do not match the verified compiler contract.");
         }
 
+        public static ShadowPolicyValidationResult ValidateCompiled(CompiledAssemblySet set, ShadowPolicyConfiguration policy,
+            string root, AssemblySnapshotReceipt receipt, bool requireLinked)
+        {
+            RequirePolicy(policy, root, receipt, requireLinked);
+            var configuration = ReadAndVerify(root, receipt, requireLinked);
+            return ShadowAssemblyPolicyValidator.ValidateCompiled(set, policy, DateTime.UtcNow,
+                configuration, ReadFixedImages(root, configuration));
+        }
+
         public static void Copy(string source, string destination, AssemblySnapshotReceipt receipt)
         {
             string expectedHash;
             if (!ReflectionBindingDefines.TryGetEnabledHash(receipt.extraScriptingDefines, out expectedHash)) return;
+            var configuration = ReadAndVerify(source, receipt, receipt.linkedPlayerReceipt != null);
             ShadowArtifactWriter.CopyVerified(ShadowHash.SafeChild(source, ConfigurationPath), destination, ConfigurationPath, expectedHash);
+            foreach (var site in FixedImageSites(configuration).GroupBy(value => value.imageSha256, StringComparer.Ordinal).Select(group => group.First()))
+            {
+                string path = FixedImageSnapshotPath(site.imageSha256);
+                ShadowArtifactWriter.CopyVerified(ShadowHash.SafeChild(source, path), destination, path, site.imageSha256);
+            }
             ShadowReflectionBindingLinkedEvidence.Copy(source, destination, receipt);
+        }
+
+        // These are the actual dynamically loaded bytes, not a later compiler
+        // output with a possibly different MVID. The raw configuration binds
+        // their hashes; compiled-policy validation also proves that they have
+        // the current NormalHotUpdate provider's complete semantics.
+        public static IReadOnlyDictionary<string, byte[]> ReadFixedImages(string root, ReflectionBindingConfiguration configuration)
+        {
+            var images = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            if (configuration == null) return images;
+            foreach (var site in FixedImageSites(configuration))
+            {
+                string path = ShadowHash.SafeChild(root, FixedImageSnapshotPath(site.imageSha256));
+                ShadowHash.Require(File.Exists(path), "FixedAssemblyImageMissing", path);
+                images[site.imagePath] = File.ReadAllBytes(path);
+            }
+            configuration.ValidateImageEvidence(images);
+            return images;
+        }
+
+        public static string FixedImageSnapshotPath(string sha256)
+        {
+            ShadowHash.Require(sha256 != null && sha256.Length == 64 && sha256.All(value =>
+                (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')), "FixedAssemblyImageHash", "Expected a lowercase SHA-256.");
+            return DirectoryName + "/Images/" + sha256 + ".dll.bytes";
+        }
+
+        private static IReadOnlyDictionary<string, byte[]> ReadProjectImages(ReflectionBindingConfiguration configuration)
+        {
+            var images = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            foreach (var site in FixedImageSites(configuration))
+            {
+                string path = ShadowHash.SafeChild(Directory.GetCurrentDirectory(), site.imagePath);
+                ShadowHash.Require(File.Exists(path), "FixedAssemblyImageMissing", path);
+                images[site.imagePath] = File.ReadAllBytes(path);
+            }
+            configuration.ValidateImageEvidence(images);
+            return images;
+        }
+
+        private static IEnumerable<ReflectionBindingSite> FixedImageSites(ReflectionBindingConfiguration configuration)
+        {
+            return configuration.sites.Where(site => site.kind == "FixedAssemblyBytes");
         }
 
         private static void VerifyInputs(string root, AssemblySnapshotReceipt receipt, ReflectionBindingConfiguration configuration, bool requireLinked)
         {
+            ReadFixedImages(root, configuration);
             foreach (var group in configuration.sites.GroupBy(site => AssemblyIdentityUtil.CanonicalName(site.assembly)))
             {
                 var inputs = (receipt.assemblies ?? new SnapshotFile[0]).Where(file => AssemblyIdentityUtil.CanonicalName(file.name) == group.Key).ToArray();
@@ -197,9 +276,13 @@ namespace HybridCLR.Editor.AssemblyShadow
                 id = site.id, consumer = site.assembly, typeName = site.typeName, methodSignature = site.methodSignature,
                 originalMethodHash = site.originalMethodHash, operationIndex = site.operationIndex,
                 allowedTypes = ShadowHash.Sorted(site.allowedTypes), reason = site.reason,
+                kind = configuration.schemaVersion == 1 ? null : site.kind,
+                imageSha256 = site.imageSha256, providerAssemblyIdentity = site.providerAssemblyIdentity, imagePath = site.imagePath,
                 // Configuration validation accepts only concrete, assembly-qualified
                 // names. Generic/array/pointer/byref syntax is rejected by CodeGen.
-                providers = ShadowHash.Sorted(site.allowedTypes.Select(value => AssemblyIdentityUtil.CanonicalName(value.Substring(value.IndexOf(',') + 1).Split(',')[0].Trim()))),
+                providers = site.kind == "FixedAssemblyBytes"
+                    ? new[] { AssemblyIdentityUtil.CanonicalName(site.providerAssemblyIdentity.Split(',')[0]) }
+                    : ShadowHash.Sorted(site.allowedTypes.Select(value => AssemblyIdentityUtil.CanonicalName(value.Substring(value.IndexOf(',') + 1).Split(',')[0].Trim()))),
             }).ToArray();
         }
 

@@ -213,7 +213,10 @@ namespace HybridCLR.Editor.AssemblyShadow
 
             private string CallbackHash(IEnumerable<TypeDef> chain, ISet<string> unknown)
             {
-                return new CallbackDependencyClosure(set, unknown, IsEngine).Compute(chain);
+                var types = chain.ToArray();
+                var serializedInputs = new HashSet<string>(types.Where(t => !IsCore(t) && !IsEngine(t))
+                    .SelectMany(t => t.Fields).Where(IsSerializedField).Select(AssemblySemanticHasher.FieldRefText), StringComparer.Ordinal);
+                return new CallbackDependencyClosure(set, unknown, IsEngine, serializedInputs).Compute(types);
             }
 
             private sealed class CallbackDependencyClosure
@@ -221,16 +224,19 @@ namespace HybridCLR.Editor.AssemblyShadow
                 private readonly CompiledAssemblySet set;
                 private readonly ISet<string> unknown;
                 private readonly Func<ITypeDefOrRef, bool> isEngine;
+                private readonly ISet<string> serializedInstanceInputs;
                 private readonly Queue<MethodDef> pending = new Queue<MethodDef>();
                 private readonly HashSet<string> methods = new HashSet<string>(StringComparer.Ordinal);
                 private readonly HashSet<string> initializedTypes = new HashSet<string>(StringComparer.Ordinal);
                 private readonly SortedDictionary<string, string> entries = new SortedDictionary<string, string>(StringComparer.Ordinal);
 
-                public CallbackDependencyClosure(CompiledAssemblySet set, ISet<string> unknown, Func<ITypeDefOrRef, bool> isEngine)
+                public CallbackDependencyClosure(CompiledAssemblySet set, ISet<string> unknown, Func<ITypeDefOrRef, bool> isEngine,
+                    ISet<string> serializedInstanceInputs)
                 {
                     this.set = set;
                     this.unknown = unknown;
                     this.isEngine = isEngine;
+                    this.serializedInstanceInputs = serializedInstanceInputs;
                 }
 
                 private bool IsEngine(ITypeDefOrRef type) { return isEngine(type); }
@@ -300,7 +306,16 @@ namespace HybridCLR.Editor.AssemblyShadow
                     if (matches.Length != 1) { unknown.Add("callback field dependency unresolved or ambiguous: " + key); return; }
                     var field = matches[0];
                     entries["field:" + key] = AssemblySemanticHasher.FieldSemanticText(field);
-                    if (!field.IsStatic) return;
+                    if (!field.IsStatic)
+                    {
+                        // Instance .ctors and other writers need not be called by the callback.
+                        // A declaration fingerprint cannot prove their state unchanged. Only
+                        // this serialized object's explicit root/base fields are proven inputs;
+                        // readonly, excluded and foreign-instance state still require review.
+                        if (!serializedInstanceInputs.Contains(AssemblySemanticHasher.FieldRefText(field)))
+                            unknown.Add("callback unproven instance state requires review: " + key);
+                        return;
+                    }
                     TrackInitialization(declaring);
                     if (reference.DeclaringType is TypeSpec || declaring.HasGenericParameters)
                         unknown.Add("callback generic static initialization cannot be proven: " + key);

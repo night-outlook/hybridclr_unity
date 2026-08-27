@@ -11,7 +11,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         public static CompiledAssemblySet Load(string snapshotDirectory,
             IEnumerable<string> referenceDirectories,
             IEnumerable<AssemblyCapability> capabilities,
-            bool rejectUnresolvedReferences = true)
+            bool rejectUnresolvedReferences = true,
+            VerifiedTargetFrameworkReferences targetFrameworkReferences = null)
         {
             ShadowHash.Require(Directory.Exists(snapshotDirectory), "SnapshotMissing", "Snapshot directory does not exist: " + snapshotDirectory);
             var snapshotPaths = FindDlls(snapshotDirectory);
@@ -58,7 +59,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                     pathByName.Add(name, path);
             }
 
-            var dictionaryResolver = new DictionaryAssemblyResolver();
+            var dictionaryResolver = new DictionaryAssemblyResolver(targetFrameworkReferences);
             var typeResolver = new Resolver(dictionaryResolver) { ProjectWinMDRefs = false };
             ModuleContext context = new ModuleContext(dictionaryResolver, typeResolver);
 
@@ -70,7 +71,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 // deterministic while still allowing an assembly to be loaded only once.
                 foreach (KeyValuePair<string, string> pair in pathByName.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
                 {
-                    ModuleDefMD module = ModuleDefMD.Load(File.ReadAllBytes(pair.Value), context);
+                    byte[] bytes = File.ReadAllBytes(pair.Value);
+                    ModuleDefMD module = ModuleDefMD.Load(bytes, context);
                     module.EnableTypeDefFindCache = true;
                     string actualName = AssemblyName(module, pair.Value);
                     ShadowHash.Require(string.Equals(actualName, pair.Key, StringComparison.OrdinalIgnoreCase),
@@ -78,7 +80,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                     ShadowHash.Require(!moduleByName.ContainsKey(actualName), "DuplicateAssembly", "Duplicate assembly simple name '" + actualName + "': " + pair.Value);
                     moduleByName.Add(actualName, module);
                     modulePathByName.Add(actualName, pair.Value);
-                    dictionaryResolver.Add(module);
+                    dictionaryResolver.Add(module, !snapshotNames.Contains(actualName), ShadowHash.Bytes(bytes));
                 }
 
                 // Compiler reference facades can advertise platform-specific APIs which
@@ -94,6 +96,10 @@ namespace HybridCLR.Editor.AssemblyShadow
                     foreach (AssemblyRef reference in pair.Value.GetAssemblyRefs())
                     {
                         string referenceName = AssemblyIdentityUtil.CanonicalName(reference.Name);
+                        ModuleDefMD supplied;
+                        if (moduleByName.TryGetValue(referenceName, out supplied) && !dictionaryResolver.IsCompatible(reference, supplied.Assembly))
+                            throw new ShadowBuildException("AssemblyIdentityMismatch", modulePathByName[pair.Key] + " -> requested " + reference.FullName +
+                                "; supplied " + supplied.Assembly.FullName + " at " + modulePathByName[referenceName]);
                         AssemblyDef resolved = null;
                         try { resolved = dictionaryResolver.Resolve(reference, pair.Value); }
                         catch (Exception) { }
@@ -243,13 +249,32 @@ namespace HybridCLR.Editor.AssemblyShadow
         private sealed class DictionaryAssemblyResolver : IAssemblyResolver
         {
             private readonly Dictionary<string, AssemblyDef> assemblies = new Dictionary<string, AssemblyDef>(StringComparer.OrdinalIgnoreCase);
+            private readonly Dictionary<AssemblyDef, string> referenceHashes = new Dictionary<AssemblyDef, string>();
+            private readonly VerifiedTargetFrameworkReferences frameworkReferences;
+            private static readonly AssemblyNameComparer ExceptVersion = new AssemblyNameComparer(
+                AssemblyNameComparerFlags.Name | AssemblyNameComparerFlags.PublicKeyToken | AssemblyNameComparerFlags.Culture | AssemblyNameComparerFlags.ContentType);
 
-            public void Add(ModuleDef module)
+            public DictionaryAssemblyResolver(VerifiedTargetFrameworkReferences frameworkReferences)
+            {
+                this.frameworkReferences = frameworkReferences;
+            }
+
+            public void Add(ModuleDef module, bool referenceOnly, string sha256)
             {
                 ShadowHash.Require(module != null && module.Assembly != null, "NotAssembly", "Module has no assembly identity.");
                 string name = AssemblyIdentityUtil.CanonicalName(module.Assembly.Name);
                 ShadowHash.Require(!assemblies.ContainsKey(name), "DuplicateAssembly", name);
                 assemblies.Add(name, module.Assembly);
+                if (referenceOnly) referenceHashes.Add(module.Assembly, sha256);
+            }
+
+            public bool IsCompatible(IAssembly requested, AssemblyDef supplied)
+            {
+                if (requested == null || supplied == null) return false;
+                if (AssemblyNameComparer.CompareAll.Equals(requested, supplied)) return true;
+                string hash;
+                return frameworkReferences != null && ExceptVersion.Equals(requested, supplied) &&
+                    referenceHashes.TryGetValue(supplied, out hash) && frameworkReferences.Contains(supplied, hash);
             }
 
             public AssemblyDef Resolve(IAssembly assembly, ModuleDef sourceModule)
@@ -258,7 +283,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                     return null;
                 AssemblyDef result;
                 assemblies.TryGetValue(AssemblyIdentityUtil.CanonicalName(assembly.Name), out result);
-                return result;
+                return IsCompatible(assembly, result) ? result : null;
             }
         }
     }

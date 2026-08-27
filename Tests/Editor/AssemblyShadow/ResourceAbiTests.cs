@@ -238,6 +238,93 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         }
 
         [Test]
+        public void CallbackPrivateInstanceConstructorStateRequiresReview()
+        { AssertUnprovenInstanceConstructorState(FieldAttributes.Private, false); }
+
+        [Test]
+        public void CallbackReadonlyInstanceConstructorStateRequiresReview()
+        { AssertUnprovenInstanceConstructorState(FieldAttributes.Public | FieldAttributes.InitOnly, false); }
+
+        [Test]
+        public void CallbackInheritedInstanceConstructorStateRequiresReview()
+        { AssertUnprovenInstanceConstructorState(FieldAttributes.Family, true); }
+
+        [Test]
+        public void CallbackNonSerializedInheritedInstanceStateRequiresReview()
+        { AssertUnprovenInstanceConstructorState(FieldAttributes.Public | FieldAttributes.NotSerialized, true); }
+
+        private static void AssertUnprovenInstanceConstructorState(FieldAttributes attributes, bool inherited)
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                fixture.CallbackContract();
+                var owner = fixture.Root;
+                if (inherited)
+                {
+                    owner = fixture.Type("Parent");
+                    owner.BaseType = fixture.Root.BaseType;
+                    fixture.Root.BaseType = owner;
+                }
+                var state = fixture.Field(owner, "DefaultValue", fixture.Module.CorLibTypes.Int32);
+                state.Attributes = attributes;
+                var value = fixture.Field(fixture.Root, "Value", fixture.Module.CorLibTypes.Int32);
+                var constructor = new MethodDefUser(".ctor", MethodSig.CreateInstance(fixture.Module.CorLibTypes.Void), MethodImplAttributes.IL,
+                    MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName);
+                constructor.Body = new CilBody();
+                var initialValue = Instruction.Create(OpCodes.Ldc_I4, 1);
+                constructor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                constructor.Body.Instructions.Add(initialValue);
+                constructor.Body.Instructions.Add(Instruction.Create(OpCodes.Stfld, state));
+                constructor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                owner.Methods.Add(constructor);
+                var callback = fixture.Callback("OnAfterDeserialize");
+                callback.Body.Instructions.Clear();
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldfld, state));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Stfld, value));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var baseline = fixture.Analyze();
+                string assemblyBefore = AssemblySemanticHasher.Compute(fixture.Module).semanticHash;
+                initialValue.Operand = 2;
+                var changed = fixture.Analyze();
+                Assert.AreNotEqual(assemblyBefore, AssemblySemanticHasher.Compute(fixture.Module).semanticHash);
+                Assert.AreEqual(ResourceAbiDiffLevel.UnknownRequiresReview, ResourceAbiDiff.Compare(baseline, changed).level,
+                    "Instance constructors and other writers are not part of the callback call graph.");
+                Assert.That(baseline.unknowns.Any(s => s.Contains("unproven instance state")));
+                Assert.That(changed.unknowns.Any(s => s.Contains("unproven instance state")));
+            }
+        }
+
+        [Test]
+        public void CallbackCanReadItsExplicitlySerializedPrivateAndInheritedInputs()
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                fixture.CallbackContract();
+                var parent = fixture.Type("Parent"); parent.BaseType = fixture.Root.BaseType; fixture.Root.BaseType = parent;
+                var inherited = fixture.Field(parent, "InheritedInput", fixture.Module.CorLibTypes.Int32);
+                inherited.Attributes = FieldAttributes.Family; fixture.Attribute(inherited, "SerializeField");
+                var input = fixture.Field(fixture.Root, "PrivateInput", fixture.Module.CorLibTypes.Int32);
+                input.Attributes = FieldAttributes.Private; fixture.Attribute(input, "SerializeField");
+                var output = fixture.Field(fixture.Root, "Value", fixture.Module.CorLibTypes.Int32);
+                var callback = fixture.Callback("OnAfterDeserialize");
+                callback.Body.Instructions.Clear();
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldfld, input));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldfld, inherited));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Add));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Stfld, output));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var baseline = fixture.Analyze();
+                Assert.IsEmpty(baseline.unknowns);
+                Assert.AreEqual(ResourceAbiDiffLevel.None, ResourceAbiDiff.Compare(baseline, fixture.Analyze()).level);
+            }
+        }
+
+        [Test]
         public void ReadonlyStaticInitializationCanRemainStableButModuleChangesCannot()
         {
             using (var fixture = new MetadataFixture())

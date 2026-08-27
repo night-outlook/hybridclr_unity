@@ -25,6 +25,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         public MethodDef OriginalMethod, GuardMethod;
         // Populated only by VerifyLinked; these are full, non-normalized shapes.
         public string LinkedProfileHash, CompiledMethodHash, LinkedMethodHash, CompiledGuardHash, LinkedGuardHash;
+        public string Kind, ImageSha256, ProviderAssemblyIdentity, ImagePath;
     }
 
     public static partial class ReflectionBindingTransformer
@@ -60,6 +61,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     // Same static Type(string) signature and call opcode preserve the
                     // original stack, branch target, instruction identity and PDB point.
                     operation.Operand = guard;
+                    operation.OpCode = OpCodes.Call;
                 }
                 Verify(module, configuration);
                 if (module.PdbState == null) module.CreatePdbState(PdbFileKind.PortablePDB);
@@ -104,18 +106,15 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 BindingChecks.Require(operation.OpCode.Code == Code.Call && guard != null && guard.DeclaringType == original.DeclaringType && guard.Name == GuardName(site, configHash),
                     "MissingGuardedSite", site.id);
                 BindingChecks.Require(expectedGuards.Add(guard), "AmbiguousGuard", site.id);
-                BindingChecks.Require(original.Body.Instructions.All(instruction => !IsAnyTypeLookup(instruction.Operand as IMethod)), "AdditionalLookup", site.id);
+                BindingChecks.Require(original.Body.Instructions.All(instruction => !IsSiteAcquisition(instruction.Operand as IMethod, site)), "AdditionalLookup", site.id);
                 BindingChecks.Require(guard.MethodSig != null && guard.MethodSig.Params.Count == 1, "GuardTemplateMismatch", site.id);
                 // The guard signature carries the original framework Type and String
                 // scopes even in deny-all mode, where no lookup MemberRef remains.
-                var returnType = guard.MethodSig.RetType.ToTypeDefOrRef();
-                BindingChecks.Require(returnType != null, "GuardTemplateMismatch", site.id);
-                var lookup = new MemberRefUser(module, "GetType", MethodSig.CreateStatic(guard.MethodSig.RetType, guard.MethodSig.Params[0]), returnType);
-                BindingChecks.Require(IsExactTypeLookup(lookup, module), "GuardTemplateMismatch", site.id);
+                var lookup = OriginalAcquisition(module, site, guard);
                 var expected = CreateGuard(module, site, configHash, lookup);
                 BindingChecks.Require(guard.HasBody && ReflectionBindingFingerprint.Shape(guard, original.DeclaringType.FullName, -1, null) ==
                     ReflectionBindingFingerprint.Shape(expected, original.DeclaringType.FullName, -1, null), "GuardTemplateMismatch", site.id);
-                BindingChecks.Require(ReflectionBindingFingerprint.Shape(original, original.DeclaringType.FullName, site.operationIndex, lookup) == site.originalMethodHash,
+                BindingChecks.Require(ReflectionBindingFingerprint.Shape(original, original.DeclaringType.FullName, site.operationIndex, lookup, null, OriginalCode(site)) == site.originalMethodHash,
                     "OriginalMethodChanged", "Virtual restoration of the original lookup did not match: " + site.id);
                 foreach (var method in module.GetTypes().SelectMany(type => type.Methods).Where(method => method.HasBody))
                     foreach (var instruction in method.Body.Instructions)
@@ -128,7 +127,8 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 var allowed = site.allowedTypes.OrderBy(value => value, StringComparer.Ordinal).ToArray();
                 verified.Add(new VerifiedReflectionBinding { SiteId = site.id, Assembly = site.assembly, TypeName = site.typeName,
                     MethodSignature = site.methodSignature, OperationIndex = site.operationIndex, OriginalMethod = original, GuardMethod = guard,
-                    ConfigurationHash = configHash, AllowedTypes = allowed, Providers = allowed.Select(ReflectionBindingConfiguration.ProviderOf).Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal).ToArray() });
+                    ConfigurationHash = configHash, AllowedTypes = allowed, Providers = Providers(site), Kind = ReflectionBindingConfiguration.KindOf(site),
+                    ImageSha256 = site.imageSha256, ProviderAssemblyIdentity = site.providerAssemblyIdentity, ImagePath = site.imagePath });
             }
             foreach (var method in module.GetTypes().SelectMany(type => type.Methods))
                 BindingChecks.Require(!method.Name.String.StartsWith(GuardPrefix, StringComparison.Ordinal) || expectedGuards.Contains(method),
@@ -156,8 +156,8 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         {
             BindingChecks.Require(site.operationIndex < method.Body.Instructions.Count, "MissingLookup", site.id);
             var operation = method.Body.Instructions[site.operationIndex];
-            BindingChecks.Require(operation.OpCode.Code == Code.Call && IsExactTypeLookup(operation.Operand as IMethod, method.Module), "WrongLookupOverload", site.id);
-            BindingChecks.Require(method.Body.Instructions.Count(instruction => IsAnyTypeLookup(instruction.Operand as IMethod)) == 1, "AdditionalLookup", site.id);
+            BindingChecks.Require(operation.OpCode.Code == OriginalCode(site) && IsExactAcquisition(operation.Operand as IMethod, method.Module, site), "WrongLookupOverload", site.id);
+            BindingChecks.Require(method.Body.Instructions.Count(instruction => IsSiteAcquisition(instruction.Operand as IMethod, site)) == 1, "AdditionalLookup", site.id);
             if (site.operationIndex > 0)
                 BindingChecks.Require(method.Body.Instructions[site.operationIndex - 1].OpCode.OpCodeType != OpCodeType.Prefix, "UnsupportedLookupPrefix", site.id);
         }
@@ -180,6 +180,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
 
         private static MethodDef CreateGuard(ModuleDef module, ReflectionBindingSite site, string hash, IMethod lookup)
         {
+            if (ReflectionBindingConfiguration.KindOf(site) != "TypeGetType") return CreateAcquisitionGuard(module, site, hash, lookup);
             var guard = new MethodDefUser(GuardName(site, hash), MethodSig.CreateStatic(lookup.MethodSig.RetType, lookup.MethodSig.Params[0]),
                 MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.HideBySig)
             { Body = new CilBody { InitLocals = true, MaxStack = 3 } };

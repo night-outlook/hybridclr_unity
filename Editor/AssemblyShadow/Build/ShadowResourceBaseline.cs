@@ -141,6 +141,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             string compileRoot = Path.GetFullPath("_temp/AssemblyShadow/ResourceCompile-" + Guid.NewGuid().ToString("N"));
             string compiled = AssemblySnapshot.Compile(compileRoot, request.target, request.architecture, request.sourcePins, request.policy, new string[0]);
             var input = AssemblySnapshot.ReadAndVerify(compiled, false);
+            var framework = TargetFrameworkReferenceVerifier.Verify(compiled, input);
             string candidatesJson = JsonUtility.ToJson(request.policy, true);
             string[] candidates = request.policy.assemblies.Where(a => a.isShadowCapable).Select(a => a.name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
             ShadowHash.Require(candidates.Length > 0, "ResourceCandidatesMissing", "Resource build has no candidate assemblies.");
@@ -150,7 +151,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             var metadata = CopyResourceMetadata(compiled, temporary, input, candidates);
             ResourceAbiDescriptor abi;
             using (var set = DnlibAssemblyLoader.Load(Path.Combine(temporary, "ResourceAssemblies"),
-                new[] { Path.Combine(compiled, "Assemblies"), Path.Combine(compiled, "References") }, request.policy.assemblies))
+                new[] { Path.Combine(compiled, "Assemblies"), Path.Combine(compiled, "References") }, request.policy.assemblies,
+                targetFrameworkReferences: framework))
             {
                 foreach (var name in candidates) set.Get(name);
                 abi = UnitySerializedTypeAnalyzer.Analyze(set, candidates);
@@ -223,6 +225,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 }
             }
             var input = AssemblySnapshot.ReadAndVerify(ShadowHash.SafeChild(root, receipt.compilerSnapshotPath), receipt.compilerSnapshotIsPlayer);
+            var framework = TargetFrameworkReferenceVerifier.Verify(ShadowHash.SafeChild(root, receipt.compilerSnapshotPath), input);
             ShadowHash.Require(input.snapshotHash == receipt.compilerSnapshotHash && input.unityVersion == receipt.unityVersion && input.target == receipt.target &&
                 input.architecture == receipt.architecture, "ResourceCompilerMismatch", "Resource compiler receipt identity changed.");
             if (receipt.provenance == FreshBuildProvenance)
@@ -238,7 +241,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             RequireProvenAbi(abi);
             ShadowHash.Require(ResourceAbiHasher.Compute(abi) == receipt.resourceAbiHash, "ResourceAbiHashMismatch", receipt.resourceAbiPath);
             using (var set = DnlibAssemblyLoader.Load(ShadowHash.SafeChild(root, receipt.metadataAssemblyDirectory),
-                new[] { ShadowHash.SafeChild(root, receipt.compilerSnapshotPath + "/Assemblies"), ShadowHash.SafeChild(root, receipt.compilerSnapshotPath + "/References") }, null))
+                new[] { ShadowHash.SafeChild(root, receipt.compilerSnapshotPath + "/Assemblies"), ShadowHash.SafeChild(root, receipt.compilerSnapshotPath + "/References") }, null,
+                targetFrameworkReferences: framework))
             {
                 foreach (string candidate in receipt.candidateAssemblies) set.Get(candidate);
                 foreach (var script in receipt.scripts)

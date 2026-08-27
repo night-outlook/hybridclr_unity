@@ -28,6 +28,10 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         [DataMember(IsRequired = true)] public int operationIndex;
         [DataMember(IsRequired = true)] public string[] allowedTypes;
         [DataMember(IsRequired = true)] public string reason;
+        [DataMember(EmitDefaultValue = false)] public string kind;
+        [DataMember(EmitDefaultValue = false)] public string imageSha256;
+        [DataMember(EmitDefaultValue = false)] public string providerAssemblyIdentity;
+        [DataMember(EmitDefaultValue = false)] public string imagePath;
     }
 
     [DataContract]
@@ -53,8 +57,8 @@ namespace HybridCLR.AssemblyShadow.CodeGen
 
         public void Validate()
         {
-            BindingChecks.Require(schemaVersion == 1 && transformerVersion == 1 && sites != null && sites.Length > 0 && sites.Length <= 4096,
-                "InvalidConfiguration", "Supported versions are schema=1, transformer=1, with at least one site.");
+            BindingChecks.Require(((schemaVersion == 1 && transformerVersion == 1) || (schemaVersion == 2 && transformerVersion == 2)) && sites != null && sites.Length > 0 && sites.Length <= 4096,
+                "InvalidConfiguration", "Supported matching schema/transformer versions are 1 and 2, with at least one site.");
             var ids = new HashSet<string>(StringComparer.Ordinal);
             var methods = new HashSet<string>(StringComparer.Ordinal);
             foreach (var site in sites)
@@ -64,10 +68,22 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     site.allowedTypes != null && site.allowedTypes.Length <= 4096 && !string.IsNullOrWhiteSpace(site.reason), "InvalidSite", "Site identity, signature, hash, index, targets and reason are mandatory.");
                 BindingChecks.Require(ids.Add(site.id), "DuplicateSite", site.id);
                 BindingChecks.Require(methods.Add(site.assembly + "\n" + site.typeName + "\n" + site.methodSignature), "DuplicateMethodSite", "Version 1 permits only one lookup site per method.");
+                string kind = KindOf(site);
+                BindingChecks.Require((schemaVersion == 1 && kind == "TypeGetType") || (schemaVersion == 2 &&
+                    new[] { "TypeGetType", "FiniteAssemblyList", "FiniteAssemblyTypes", "FixedAssemblyBytes" }.Contains(site.kind, StringComparer.Ordinal)),
+                    "InvalidAcquisitionKind", site.id);
+                if (kind == "FixedAssemblyBytes")
+                {
+                    BindingChecks.Require(site.allowedTypes.Length == 0 && BindingChecks.IsHash(site.imageSha256) && IsSafeImagePath(site.imagePath), "InvalidFixedImage", site.id);
+                    RequireFullAssemblyIdentity(site.providerAssemblyIdentity);
+                }
+                else BindingChecks.Require(string.IsNullOrEmpty(site.imageSha256) && string.IsNullOrEmpty(site.imagePath) && string.IsNullOrEmpty(site.providerAssemblyIdentity), "UnexpectedFixedImage", site.id);
                 var targets = new HashSet<string>(StringComparer.Ordinal);
                 foreach (string target in site.allowedTypes)
                 {
                     ProviderOf(target);
+                    if (kind == "FiniteAssemblyList" || kind == "FiniteAssemblyTypes")
+                        RequireFullAssemblyIdentity(target.Substring(target.IndexOf(',') + 2));
                     BindingChecks.Require(targets.Add(target), "DuplicateAllowedType", site.id);
                 }
             }
@@ -76,7 +92,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         public string ComputeHash()
         {
             Validate();
-            using (var hash = new BindingHash("assembly-shadow-reflection-configuration:1"))
+            using (var hash = new BindingHash("assembly-shadow-reflection-configuration:" + schemaVersion))
             {
                 hash.Add(schemaVersion); hash.Add(transformerVersion); hash.Add(sites.Length);
                 foreach (var site in sites.OrderBy(site => site.id, StringComparer.Ordinal))
@@ -84,12 +100,41 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     hash.Add(site.id); hash.Add(site.assembly); hash.Add(site.typeName); hash.Add(site.methodSignature); hash.Add(site.originalMethodHash);
                     hash.Add(site.operationIndex); hash.Add(site.reason); hash.Add(site.allowedTypes.Length);
                     foreach (string target in site.allowedTypes.OrderBy(value => value, StringComparer.Ordinal)) hash.Add(target);
+                    if (schemaVersion == 2) { hash.Add(site.kind); hash.Add(site.imageSha256); hash.Add(site.providerAssemblyIdentity); hash.Add(site.imagePath); }
                 }
                 return hash.Finish();
             }
         }
 
         public bool Targets(string assemblyName) { Validate(); return sites.Any(site => site.assembly == assemblyName); }
+
+        public static string KindOf(ReflectionBindingSite site) { return string.IsNullOrEmpty(site.kind) ? "TypeGetType" : site.kind; }
+
+        public void ValidateImageEvidence(IReadOnlyDictionary<string, byte[]> images)
+        {
+            Validate();
+            foreach (var site in sites.Where(value => KindOf(value) == "FixedAssemblyBytes"))
+            {
+                byte[] bytes;
+                BindingChecks.Require(images != null && images.TryGetValue(site.imagePath, out bytes), "FixedImageEvidenceMissing", site.imagePath);
+                bytes = images[site.imagePath];
+                BindingChecks.Require(bytes != null && BindingChecks.Sha256(bytes) == site.imageSha256, "FixedImageHashMismatch", site.id);
+                using (var module = dnlib.DotNet.ModuleDefMD.Load(bytes, new dnlib.DotNet.ModuleCreationOptions { TryToLoadPdbFromDisk = false }))
+                    BindingChecks.Require(module.Assembly != null && module.Assembly.FullName == site.providerAssemblyIdentity, "FixedImageIdentityMismatch", site.id);
+            }
+        }
+
+        private static bool IsSafeImagePath(string path)
+        { return !string.IsNullOrWhiteSpace(path) && path.IndexOf('\\') < 0 && path.IndexOf(':') < 0 && !Path.IsPathRooted(path) &&
+            path.Split('/').All(part => part.Length > 0 && part != "." && part != ".."); }
+
+        private static void RequireFullAssemblyIdentity(string identity)
+        {
+            BindingChecks.Require(!string.IsNullOrWhiteSpace(identity), "InvalidAssemblyIdentity", "A complete assembly identity is required.");
+            ProviderOf("Binding.Anchor, " + identity);
+            BindingChecks.Require(identity.Split(',').Length == 4 && new dnlib.DotNet.AssemblyNameInfo(identity).FullName == identity,
+                "InvalidAssemblyIdentity", identity);
+        }
 
         public static string ProviderOf(string assemblyQualifiedType)
         {

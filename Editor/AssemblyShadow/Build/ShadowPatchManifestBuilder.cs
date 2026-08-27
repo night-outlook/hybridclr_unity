@@ -37,10 +37,10 @@ namespace HybridCLR.Editor.AssemblyShadow
             ShadowReflectionBindingEvidence.RequirePolicy(policy, request.currentCompileSnapshot, receipt, false);
             ShadowHash.Require((policy.reflectionBindingConfigurationHash ?? "") == (baseline.reflectionBindingConfigurationHash ?? ""),
                 "ReflectionBindingPolicyChanged", "Changing a fixed AOT reflection contract requires a new Player baseline.");
-            using (var set = ShadowBaselineManifestBuilder.LoadSnapshot(request.currentCompileSnapshot, policy))
+            using (var set = ShadowBaselineManifestBuilder.LoadSnapshot(request.currentCompileSnapshot, policy, receipt))
             {
                 ShadowReflectionBindingEvidence.AddCompiledDependencies(policy, set.Assemblies.Values);
-                ShadowAssemblyPolicyValidator.ValidateCompiled(set, policy, DateTime.UtcNow).ThrowIfInvalid();
+                ShadowReflectionBindingEvidence.ValidateCompiled(set, policy, request.currentCompileSnapshot, receipt, false).ThrowIfInvalid();
                 var current = set.Assemblies.Values.ToArray();
                 string bootstrapAbi = ShadowBaselineManifestBuilder.BootstrapHash(current);
                 ShadowHash.Require(bootstrapAbi == baseline.bootstrapAbiHash, "BootstrapAbiChanged", "Fixed Bootstrap metadata/IL changed.");

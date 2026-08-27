@@ -22,10 +22,10 @@ namespace HybridCLR.Editor.AssemblyShadow
             // The capture is only useful if its corresponding native artifact still exists.
             ShadowHash.Require(File.Exists(receipt.nativeLibraryPath) && ShadowHash.File(receipt.nativeLibraryPath) == receipt.nativeLibrarySha256, "PlayerArtifactMismatch", receipt.nativeLibraryPath);
             var frozenResources = ShadowResourceBaseline.ReadAndVerify(request.resourceBaselinePath, request.target, request.architecture);
-            using (var set = LoadSnapshot(request.playerInputSnapshot, policy))
+            using (var set = LoadSnapshot(request.playerInputSnapshot, policy, receipt))
             {
                 ShadowReflectionBindingEvidence.AddCompiledDependencies(policy, set.Assemblies.Values);
-                ShadowAssemblyPolicyValidator.ValidateCompiled(set, policy, DateTime.UtcNow).ThrowIfInvalid();
+                ShadowReflectionBindingEvidence.ValidateCompiled(set, policy, request.playerInputSnapshot, receipt, true).ThrowIfInvalid();
                 var graph = new AssemblyReferenceGraph(set.Assemblies.Values, policy.dependencies);
                 string[] candidates = set.Assemblies.Values.Where(a => a.isShadowCapable).Select(a => a.name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
                 string[] bootstrap = set.Assemblies.Values.Where(a => a.isBootstrap).Select(a => a.name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
@@ -79,9 +79,11 @@ namespace HybridCLR.Editor.AssemblyShadow
             return map.bundles.Select(b => new AssetBundleBuild { assetBundleName = b.name, assetNames = b.assets }).ToArray();
         }
 
-        internal static CompiledAssemblySet LoadSnapshot(string root, ShadowPolicyConfiguration policy)
+        internal static CompiledAssemblySet LoadSnapshot(string root, ShadowPolicyConfiguration policy, AssemblySnapshotReceipt verifiedReceipt)
         {
-            return DnlibAssemblyLoader.Load(Path.Combine(root, "Assemblies"), new[] { Path.Combine(root, "References") }, policy.assemblies);
+            var framework = TargetFrameworkReferenceVerifier.Verify(root, verifiedReceipt);
+            return DnlibAssemblyLoader.Load(Path.Combine(root, "Assemblies"), new[] { Path.Combine(root, "References") }, policy.assemblies,
+                targetFrameworkReferences: framework);
         }
 
         internal static string BootstrapHash(IEnumerable<AssemblyDescriptor> descriptors)

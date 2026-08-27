@@ -39,6 +39,35 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         }
 
         [Test]
+        public void ExplicitConfiguredFileIsReadInsteadOfFallback()
+        {
+            string fallback = Path.Combine(root, "default-policy.json");
+            string configured = Path.Combine(root, "custom-policy.json");
+            File.WriteAllText(fallback, "fallback");
+            File.WriteAllText(configured, "configured");
+
+            Assert.That(ReadTextAssetOrPath(null, configured, fallback), Is.EqualTo("configured"));
+        }
+
+        [Test]
+        public void CaseDifferentExplicitPathIsNotReplacedByFallback()
+        {
+            string fallback = Path.Combine(root, "policy.json");
+            string configured = Path.Combine(root, "Policy.json");
+            File.WriteAllText(fallback, "fallback");
+            File.WriteAllText(configured, "configured");
+
+            Assert.That(PathsEqual(configured, fallback), Is.False);
+
+            // APFS/HFS+ may be case-insensitive.  The path-selection assertion
+            // above is still meaningful there; distinct-file content is not.
+            if (string.Equals(File.ReadAllText(fallback), "configured", StringComparison.Ordinal))
+                return;
+
+            Assert.That(ReadTextAssetOrPath(null, configured, fallback), Is.EqualTo("configured"));
+        }
+
+        [Test]
         public void EmptyExplicitTextAssetDoesNotFallBackToPermissiveDefault()
         {
             string fallback = Path.Combine(root, "default-dependencies.json");
@@ -77,6 +106,14 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             {
                 throw exception.InnerException;
             }
+        }
+
+        private static bool PathsEqual(string left, string right)
+        {
+            MethodInfo method = typeof(AssemblyShadowSettingsUtil).GetMethod(
+                "PathsEqual", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+            return (bool)method.Invoke(null, new object[] { left, right });
         }
     }
 }

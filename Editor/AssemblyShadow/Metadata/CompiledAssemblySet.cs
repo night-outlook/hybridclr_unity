@@ -59,15 +59,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             if (resolved != null && IsLoadedModule(resolved.Module))
                 return resolved;
 
-            string key = AssemblyIdentityUtil.TypeKey(type);
-            foreach (ModuleDefMD module in _modules.Values)
-            {
-                foreach (TypeDef candidate in module.GetTypes())
-                {
-                    if (string.Equals(AssemblyIdentityUtil.TypeKey(candidate), key, StringComparison.Ordinal))
-                        return candidate;
-                }
-            }
+            // A simple-name/type-key scan would undo an identity rejection from
+            // the resolver (including for external TypeRefs and TypeSpecs).
             return null;
         }
 
