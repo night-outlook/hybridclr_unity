@@ -11,6 +11,21 @@ namespace HybridCLR.Editor.AssemblyShadow
         // it never changes the user's source capability declarations.
         public static ShadowPolicyConfiguration Apply(ShadowPolicyConfiguration policy, AssemblySnapshotReceipt playerReceipt)
         {
+            return ApplyInternal(policy, playerReceipt, false, null, null);
+        }
+
+        // Patch analysis may demote a frozen candidate so graph validation can
+        // report the actual non-shadow consumer path. The Player baseline path
+        // remains strict through Apply().
+        public static ShadowPolicyConfiguration ApplyPatch(ShadowPolicyConfiguration policy, AssemblySnapshotReceipt playerReceipt,
+            IEnumerable<string> frozenCandidates, IEnumerable<string> frozenBootstraps)
+        {
+            return ApplyInternal(policy, playerReceipt, true, frozenCandidates, frozenBootstraps);
+        }
+
+        private static ShadowPolicyConfiguration ApplyInternal(ShadowPolicyConfiguration policy, AssemblySnapshotReceipt playerReceipt, bool allowCandidateDemotion,
+            IEnumerable<string> expectedCandidates, IEnumerable<string> expectedBootstraps)
+        {
             ShadowHash.Require(policy != null && playerReceipt != null && playerReceipt.schemaVersion == 1 &&
                 playerReceipt.kind == "PlayerBuildInputs" && playerReceipt.playerBuildSucceeded && playerReceipt.playerBuildFilterCaptured &&
                 !string.IsNullOrWhiteSpace(playerReceipt.buildGuid) && !string.IsNullOrWhiteSpace(playerReceipt.nativeLibrarySha256) &&
@@ -59,12 +74,42 @@ namespace HybridCLR.Editor.AssemblyShadow
             foreach (AssemblyCapability capability in source.Values)
                 ShadowHash.Require(capability.classification != AssemblyClassification.BuildFiltered, "InvalidFilteredSourceRole",
                     "BuildFiltered is a derived receipt role, not a source policy declaration: " + capability.name);
-            var linkedNames = new HashSet<string>(playerReceipt.linkedPlayerReceipt.assemblies.Select(file => file.name), StringComparer.OrdinalIgnoreCase);
-            var protectedNames = new HashSet<string>(playerReceipt.linkedPlayerReceipt.protectedAssemblies, StringComparer.OrdinalIgnoreCase);
-            var currentProtected = new HashSet<string>(source.Values.Where(item => item.isShadowCapable || item.isBootstrap)
+            var linkedNames = new HashSet<string>(playerReceipt.linkedPlayerReceipt.assemblies.Select(file => AssemblyIdentityUtil.CanonicalName(file.name)), StringComparer.OrdinalIgnoreCase);
+            var protectedNames = new HashSet<string>(playerReceipt.linkedPlayerReceipt.protectedAssemblies.Select(AssemblyIdentityUtil.CanonicalName), StringComparer.OrdinalIgnoreCase);
+            var currentBootstrap = new HashSet<string>(source.Values.Where(item => item.isBootstrap)
                 .Select(item => AssemblyIdentityUtil.CanonicalName(item.name)), StringComparer.OrdinalIgnoreCase);
-            ShadowHash.Require(protectedNames.SetEquals(currentProtected) && currentProtected.IsSubsetOf(linkedNames),
-                "LinkedCandidateSetChanged", "Current candidate/bootstrap roles must match the frozen protected linked inventory.");
+            var currentCandidates = new HashSet<string>(source.Values.Where(item => item.isShadowCapable)
+                .Select(item => AssemblyIdentityUtil.CanonicalName(item.name)), StringComparer.OrdinalIgnoreCase);
+            ShadowHash.Require(protectedNames.IsSubsetOf(linkedNames), "LinkedCandidateMissing", "Every frozen candidate/bootstrap must remain present after linking.");
+            if (allowCandidateDemotion && expectedCandidates != null && expectedBootstraps != null)
+            {
+                var frozenCandidates = Names(expectedCandidates, "LinkedCandidateSetChanged");
+                var frozenBootstrap = Names(expectedBootstraps, "LinkedBootstrapSetChanged");
+                ShadowHash.Require(frozenCandidates.Intersect(frozenBootstrap).Count() == 0, "LinkedBootstrapSetChanged", "A frozen assembly cannot be both candidate and Bootstrap.");
+                ShadowHash.Require(protectedNames.SetEquals(frozenCandidates.Concat(frozenBootstrap)), "LinkedCandidateSetChanged", "Frozen baseline candidate/bootstrap identities differ from linked evidence.");
+                ShadowHash.Require(frozenBootstrap.SetEquals(currentBootstrap), "LinkedBootstrapSetChanged", "Bootstrap roles must match the frozen baseline identity.");
+                ShadowHash.Require(currentCandidates.IsSubsetOf(frozenCandidates), "LinkedCandidatePromotion", "Patch policy cannot promote a new shadow candidate.");
+                foreach (string name in frozenCandidates)
+                {
+                    AssemblyCapability current;
+                    ShadowHash.Require(source.TryGetValue(name, out current), "LinkedCandidateMissing", "Frozen candidate is absent from the current source policy: " + name);
+                    ShadowHash.Require(current.classification == AssemblyClassification.Runtime && !current.isBootstrap,
+                        "LinkedCandidateRoleChanged", "Frozen candidate changed classification or Bootstrap role: " + name);
+                }
+                foreach (string name in frozenBootstrap)
+                {
+                    AssemblyCapability current;
+                    ShadowHash.Require(source.TryGetValue(name, out current), "LinkedCandidateMissing", "Frozen Bootstrap is absent from the current source policy: " + name);
+                    ShadowHash.Require(current.classification == AssemblyClassification.Runtime && current.isBootstrap && !current.isShadowCapable,
+                        "LinkedBootstrapRoleChanged", "Frozen Bootstrap changed classification or candidate role: " + name);
+                }
+            }
+            else
+            {
+                ShadowHash.Require(protectedNames.SetEquals(currentCandidates.Concat(currentBootstrap)), "LinkedCandidateSetChanged", "Current candidate/bootstrap roles must match the frozen protected linked inventory.");
+            }
+            foreach (string name in protectedNames)
+                ShadowHash.Require(source.ContainsKey(name), "LinkedCandidateMissing", "Frozen candidate/bootstrap is absent from the current source policy: " + name);
 
             ShadowPolicyConfiguration derived = Clone(policy);
             foreach (AssemblyCapability capability in derived.assemblies)
@@ -91,6 +136,17 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             return first.classification == second.classification && first.isPrecompiled == second.isPrecompiled &&
                 first.isShadowCapable == second.isShadowCapable && first.isBootstrap == second.isBootstrap && first.capabilityDeclared == second.capabilityDeclared;
+        }
+
+        private static HashSet<string> Names(IEnumerable<string> values, string code)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string value in values ?? new string[0])
+            {
+                string name = AssemblyIdentityUtil.CanonicalName(value);
+                ShadowHash.Require(!string.IsNullOrWhiteSpace(name) && result.Add(name), code, "Invalid or duplicate frozen assembly identity: " + value);
+            }
+            return result;
         }
 
         private static ShadowPolicyConfiguration Clone(ShadowPolicyConfiguration source)

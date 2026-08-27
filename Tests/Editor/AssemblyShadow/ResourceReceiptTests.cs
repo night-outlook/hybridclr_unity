@@ -134,6 +134,103 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
         }
 
+        [Test]
+        public void BuiltinEngineSkinIsProvenByBackingBytesAndEngineModulesWithoutSkippingObjects()
+        {
+            using (var fixture = new BuiltinFixture())
+            {
+                fixture.Verify();
+                Assert.AreEqual(AssetDatabase.LoadAllAssetsAtPath(fixture.Source.path).Length, fixture.Proof.objects.Length);
+                Assert.That(fixture.Proof.objects.Any(o => o.typeName == "UnityEngine.GUISkin"));
+                Assert.That(fixture.Proof.objects.Any(o => o.localId == 10001 && o.typeName == "UnityEngine.Texture2D"));
+                Assert.AreEqual(ShadowHash.File(Path.Combine(EditorApplication.applicationContentsPath, "Resources/unity default resources")), fixture.Proof.backingSha256);
+                Assert.That(fixture.Proof.modules.Any(m => m.assemblyName == "UnityEngine.IMGUIModule"));
+                string relocated = fixture.Root + "-relocated";
+                Directory.Move(fixture.Root, relocated); fixture.Root = relocated;
+                fixture.Verify();
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void BuiltinBackingAndDefiningModuleBytesAreRehashed(bool module)
+        {
+            using (var fixture = new BuiltinFixture())
+            {
+                string path = Path.Combine(fixture.Root, module ? fixture.Proof.modules[0].path : fixture.Proof.backingPath);
+                File.SetAttributes(path, System.IO.FileAttributes.Normal); File.AppendAllText(path, "changed");
+                Assert.AreEqual("ResourceBuiltinProofMismatch", Assert.Throws<ShadowBuildException>(() => fixture.Verify()).Code);
+            }
+        }
+
+        [TestCase("missing-id", "ResourceBuiltinIdentityMismatch")]
+        [TestCase("duplicate-id", "ResourceBuiltinIdentityMismatch")]
+        [TestCase("foreign-guid", "ResourceBuiltinIdentityMismatch")]
+        [TestCase("nonpersistent", "ResourceBuiltinIdentityMismatch")]
+        [TestCase("foreign-type", "ResourceBuiltinTypeUnproven")]
+        [TestCase("unknown-type", "ResourceBuiltinTypeUnproven")]
+        [TestCase("monobehaviour", "ResourceBuiltinTypeUnproven")]
+        public void RehashedBuiltinProofStillRequiresIdentityAndEngineTypeEvidence(string mutation, string expected)
+        {
+            using (var fixture = new BuiltinFixture())
+            {
+                var item = fixture.Proof.objects[0];
+                switch (mutation)
+                {
+                    case "missing-id": item.localId = 0; break;
+                    case "duplicate-id": item.localId = fixture.Proof.objects[1].localId; break;
+                    case "foreign-guid": item.guid = new string('f', 32); break;
+                    case "nonpersistent": item.persistent = false; break;
+                    case "foreign-type": item.assemblyName = typeof(ResourceReceiptTests).Assembly.GetName().Name; item.typeName = typeof(AuthoredScriptableObject).FullName; break;
+                    case "unknown-type": item.typeName = "UnityEngine.NotARealEngineType"; break;
+                    case "monobehaviour": item.assemblyName = "UnityEngine.CoreModule"; item.typeName = "UnityEngine.MonoBehaviour"; break;
+                }
+                fixture.Reseal();
+                Assert.AreEqual(expected, Assert.Throws<ShadowBuildException>(() => fixture.Verify()).Code);
+            }
+        }
+
+        [Test]
+        public void ProjectScriptableObjectTypeCannotBeClassifiedAsEngineOwned()
+        {
+            var method = typeof(ShadowResourceBaseline).GetMethod("RequireEngineModule", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            var exception = Assert.Throws<System.Reflection.TargetInvocationException>(() => method.Invoke(null, new object[] { typeof(AuthoredScriptableObject) }));
+            Assert.IsInstanceOf<ShadowBuildException>(exception.InnerException);
+            Assert.AreEqual("ResourceBuiltinTypeUnproven", ((ShadowBuildException)exception.InnerException).Code);
+        }
+
+        private sealed class AuthoredScriptableObject : ScriptableObject { }
+
+        private sealed class BuiltinFixture : IDisposable
+        {
+            public string Root;
+            public ShadowResourceSource Source;
+            public ShadowBuiltinResourceProof Proof;
+            public BuiltinFixture()
+            {
+                Root = Path.Combine(Path.GetTempPath(), "ShadowBuiltinReceiptTest-" + System.Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(Root);
+                try
+                {
+                    Source = ShadowResourceBaseline.CaptureBuiltinSource("Library/unity default resources", Root);
+                    Proof = JsonUtility.FromJson<ShadowBuiltinResourceProof>(File.ReadAllText(Path.Combine(Root, Source.snapshotPath)));
+                }
+                catch { Dispose(); throw; }
+            }
+            public void Verify() { ShadowResourceBaseline.VerifyBuiltinSource(Root, Source); }
+            public void Reseal()
+            {
+                string path = Path.Combine(Root, Source.snapshotPath);
+                File.WriteAllText(path, JsonUtility.ToJson(Proof, true), new UTF8Encoding(false)); Source.sha256 = ShadowHash.File(path);
+            }
+            public void Dispose()
+            {
+                if (!Directory.Exists(Root)) return;
+                foreach (string path in Directory.GetFiles(Root, "*", SearchOption.AllDirectories)) File.SetAttributes(path, System.IO.FileAttributes.Normal);
+                Directory.Delete(Root, true);
+            }
+        }
+
         private static ResourceAbiDescriptor ChangedAbi()
         {
             return new ResourceAbiDescriptor(new[] { new ResourceAbiTypeDescriptor { typeKey = "fixture:Test:Component", assembly = "fixture", @namespace = "Test", type = "Component",

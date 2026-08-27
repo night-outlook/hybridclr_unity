@@ -53,6 +53,29 @@ namespace HybridCLR.Editor.AssemblyShadow
     }
 
     [Serializable]
+    public sealed class ShadowBuiltinResourceProof
+    {
+        public int schemaVersion = 1;
+        public string unityVersion, virtualPath, guid, backingPath, backingSha256;
+        public ShadowBuiltinModuleProof[] modules;
+        public ShadowBuiltinObjectProof[] objects;
+    }
+
+    [Serializable]
+    public sealed class ShadowBuiltinModuleProof
+    {
+        public string assemblyName, path, sha256;
+    }
+
+    [Serializable]
+    public sealed class ShadowBuiltinObjectProof
+    {
+        public string name, typeName, assemblyName, guid, serializedSha256;
+        public long localId;
+        public bool persistent;
+    }
+
+    [Serializable]
     public sealed class ShadowResourceBaselineReceipt
     {
         public int schemaVersion = 1;
@@ -191,6 +214,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             foreach (var source in receipt.sources)
             {
                 VerifyFile(root, source.snapshotPath, source.sha256, "ResourceSourceHashMismatch");
+                if (source.builtin) VerifyBuiltinSource(root, source);
                 if (!string.IsNullOrEmpty(source.metaSnapshotPath))
                 {
                     VerifyFile(root, source.metaSnapshotPath, source.metaSha256, "ResourceSourceHashMismatch");
@@ -342,7 +366,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             else
             {
                 source.builtin = true;
-                string payload = BuiltinPayload(path, out source.guid);
+                string payload = BuiltinPayload(path, out source.guid, root);
                 source.sha256 = ShadowHash.Text(payload);
                 string destination = ShadowHash.SafeChild(root, relative);
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)); File.WriteAllText(destination, payload, new UTF8Encoding(false));
@@ -350,23 +374,174 @@ namespace HybridCLR.Editor.AssemblyShadow
             return source;
         }
 
-        private static string BuiltinPayload(string path, out string guid)
+        private static string BuiltinPayload(string path, out string guid, string captureRoot = null)
         {
+            string folder = Path.GetDirectoryName(path.Replace('\\', '/'));
+            ShadowHash.Require(folder == "Library" || folder == "Resources", "ResourceBuiltinUnproven", "Not a Unity resource container: " + path);
+            string backing = Path.Combine(EditorApplication.applicationContentsPath, "Resources", Path.GetFileName(path));
+            ShadowHash.Require(File.Exists(backing), "ResourceBuiltinUnproven", "No engine backing bytes for " + path);
+            guid = AssetDatabase.AssetPathToGUID(path);
+            ShadowHash.Require(!string.IsNullOrEmpty(guid) && AssetDatabase.GUIDToAssetPath(guid) == path,
+                "ResourceBuiltinUnproven", "Builtin container lacks a round-trip AssetDatabase identity: " + path);
             var objects = AssetDatabase.LoadAllAssetsAtPath(path);
             ShadowHash.Require(objects != null && objects.Length > 0, "ResourceSourceMissing", path);
-            var identities = new HashSet<string>(StringComparer.Ordinal);
-            var payload = new List<string>();
+            var identities = new HashSet<long>();
+            var modules = new Dictionary<string, ShadowBuiltinModuleProof>(StringComparer.Ordinal);
+            var payload = new List<ShadowBuiltinObjectProof>();
+            var proof = new ShadowBuiltinResourceProof { unityVersion = Application.unityVersion, virtualPath = path, guid = guid, backingSha256 = ShadowHash.File(backing) };
+            proof.backingPath = "BuiltinProof/Resources/" + proof.backingSha256 + "/" + Path.GetFileName(backing);
+            if (captureRoot != null) CopyBuiltinProof(backing, captureRoot, proof.backingPath, proof.backingSha256);
             foreach (var asset in objects)
             {
                 string identity = null; long localId = 0;
-                ShadowHash.Require(asset != null && !(asset is MonoBehaviour) && !(asset is ScriptableObject) &&
-                    AssetDatabase.TryGetGUIDAndLocalFileIdentifier(asset, out identity, out localId), "ResourceBuiltinUnproven", path);
-                identities.Add(identity);
-                payload.Add(localId + ":" + asset.GetType().AssemblyQualifiedName + ":" + EditorJsonUtility.ToJson(asset));
+                bool identified = asset != null && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(asset, out identity, out localId);
+                ShadowHash.Require(asset != null && !(asset is MonoBehaviour) && identified && identity == guid && localId != 0 &&
+                    EditorUtility.IsPersistent(asset) && AssetDatabase.GetAssetPath(asset) == path && identities.Add(localId),
+                    "ResourceBuiltinUnproven", path + ": " + (asset == null ? "null object" :
+                        "name=" + asset.name + ", type=" + asset.GetType().AssemblyQualifiedName + ", assetPath=" + AssetDatabase.GetAssetPath(asset) +
+                        ", persistent=" + EditorUtility.IsPersistent(asset) + ", identified=" + identified + ", guid=" + identity + ", localId=" + localId));
+                // ScriptableObject is also the base of native engine objects such as GUISkin.
+                // The concrete type and its complete Unity base chain must come from the
+                // running installation's actual engine modules; a project subclass cannot pass.
+                for (Type type = asset.GetType(); type != null && type != typeof(object); type = type.BaseType)
+                {
+                    string modulePath = RequireEngineModule(type);
+                    string name = type.Assembly.GetName().Name;
+                    if (modules.ContainsKey(name)) continue;
+                    string hash = ShadowHash.File(modulePath);
+                    var module = new ShadowBuiltinModuleProof { assemblyName = name, path = "BuiltinProof/Modules/" + hash + "/" + name + ".dll", sha256 = hash };
+                    modules.Add(name, module);
+                    if (captureRoot != null) CopyBuiltinProof(modulePath, captureRoot, module.path, hash);
+                }
+                payload.Add(new ShadowBuiltinObjectProof { name = asset.name, typeName = asset.GetType().FullName.Replace('+', '/'),
+                    assemblyName = asset.GetType().Assembly.GetName().Name, guid = identity, localId = localId, persistent = true,
+                    serializedSha256 = ShadowHash.Text(EditorJsonUtility.ToJson(asset)) });
             }
-            ShadowHash.Require(identities.Count == 1, "ResourceBuiltinUnproven", path);
-            guid = identities.Single();
-            return Application.unityVersion + "\n" + string.Join("\n", payload.OrderBy(p => p, StringComparer.Ordinal).ToArray());
+            proof.modules = modules.Values.OrderBy(m => m.assemblyName, StringComparer.Ordinal).ToArray();
+            proof.objects = payload.OrderBy(o => o.localId).ToArray();
+            return JsonUtility.ToJson(proof, true);
+        }
+
+        private static string RequireEngineModule(Type type)
+        {
+            string name = type.Assembly.GetName().Name;
+            string expected = Path.GetFullPath(Path.Combine(EditorApplication.applicationContentsPath, "Managed/UnityEngine", name + ".dll"));
+            ShadowHash.Require(IsInstallationModule(name) && !type.Assembly.IsDynamic &&
+                !string.IsNullOrEmpty(type.Assembly.Location) && Path.GetFullPath(type.Assembly.Location) == expected && File.Exists(expected),
+                "ResourceBuiltinTypeUnproven", "Builtin concrete/base type is not defined by the running Unity engine: " + type.AssemblyQualifiedName);
+            return expected;
+        }
+
+        private static bool IsInstallationModule(string name)
+        {
+            // The native MonoScript wrapper lives in UnityEditor.CoreModule, including
+            // for builtin Editor assets. Its bytes still have to come from the running
+            // installation's Managed/UnityEngine directory, not a project/package DLL.
+            return name == "UnityEngine" || name.StartsWith("UnityEngine.", StringComparison.Ordinal) ||
+                name == "UnityEditor" || name.StartsWith("UnityEditor.", StringComparison.Ordinal);
+        }
+
+        private static void CopyBuiltinProof(string source, string root, string relative, string hash)
+        {
+            string destination = ShadowHash.SafeChild(root, relative);
+            if (File.Exists(destination))
+                ShadowHash.Require(ShadowHash.File(destination) == hash && ShadowHash.File(source) == hash, "ResourceBuiltinProofMismatch", relative);
+            else ShadowArtifactWriter.CopyVerified(source, root, relative, hash);
+        }
+
+        /// <summary>Revalidates portable engine bytes and type provenance without loading a current Editor asset.</summary>
+        public static void VerifyBuiltinSource(string root, ShadowResourceSource source)
+        {
+            ShadowHash.Require(source != null && source.builtin, "ResourceBuiltinProofMissing", "Expected a builtin source receipt.");
+            VerifyFile(root, source.snapshotPath, source.sha256, "ResourceSourceHashMismatch");
+            var proof = JsonUtility.FromJson<ShadowBuiltinResourceProof>(File.ReadAllText(ShadowHash.SafeChild(root, source.snapshotPath)));
+            ShadowHash.Require(proof != null && proof.schemaVersion == 1 && proof.unityVersion == Application.unityVersion && proof.virtualPath == source.path &&
+                proof.guid == source.guid && !string.IsNullOrEmpty(proof.guid) && proof.objects != null && proof.objects.Length > 0 && proof.modules != null && proof.modules.Length > 0,
+                "ResourceBuiltinProofMissing", source.path);
+            VerifyFile(root, proof.backingPath, proof.backingSha256, "ResourceBuiltinProofMismatch");
+            var modules = new Dictionary<string, ModuleDefMD>(StringComparer.Ordinal);
+            try
+            {
+                foreach (var moduleProof in proof.modules)
+                {
+                    ShadowHash.Require(moduleProof != null && !string.IsNullOrEmpty(moduleProof.assemblyName) &&
+                        IsInstallationModule(moduleProof.assemblyName) && !modules.ContainsKey(moduleProof.assemblyName),
+                        "ResourceBuiltinTypeUnproven", "Invalid or duplicate engine module proof.");
+                    VerifyFile(root, moduleProof.path, moduleProof.sha256, "ResourceBuiltinProofMismatch");
+                    var module = ModuleDefMD.Load(File.ReadAllBytes(ShadowHash.SafeChild(root, moduleProof.path)));
+                    if (module.Assembly == null || module.Assembly.Name.String != moduleProof.assemblyName)
+                    { module.Dispose(); throw new ShadowBuildException("ResourceBuiltinTypeUnproven", "Engine module identity differs from its proof."); }
+                    modules.Add(moduleProof.assemblyName, module);
+                }
+                var identities = new HashSet<long>();
+                var provenTypes = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var asset in proof.objects)
+                {
+                    ShadowHash.Require(asset != null && asset.persistent && asset.guid == proof.guid && asset.localId != 0 && identities.Add(asset.localId) &&
+                        Regex.IsMatch(asset.serializedSha256 ?? "", "^[0-9a-f]{64}$"), "ResourceBuiltinIdentityMismatch", source.path);
+                    if (provenTypes.Add(asset.assemblyName + ":" + asset.typeName)) RequireEngineObjectType(modules, asset.assemblyName, asset.typeName);
+                }
+            }
+            finally { foreach (var module in modules.Values) module.Dispose(); }
+        }
+
+        private static void RequireEngineObjectType(IDictionary<string, ModuleDefMD> modules, string assemblyName, string typeName)
+        {
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+            while (true)
+            {
+                ModuleDefMD module;
+                ShadowHash.Require(!string.IsNullOrEmpty(assemblyName) && !string.IsNullOrEmpty(typeName) && visited.Add(assemblyName + ":" + typeName) && modules.TryGetValue(assemblyName, out module),
+                    "ResourceBuiltinTypeUnproven", "Unproven engine type/base chain: " + assemblyName + ":" + typeName);
+                module = modules[assemblyName];
+                var types = module.GetTypes().Where(t => t.FullName == typeName).ToArray();
+                ShadowHash.Require(types.Length == 1 && typeName != "UnityEngine.MonoBehaviour", "ResourceBuiltinTypeUnproven", "Missing/ambiguous or MonoBehaviour builtin type: " + typeName);
+                if (typeName == "UnityEngine.Object") return;
+                var baseType = types[0].BaseType;
+                ShadowHash.Require(baseType != null && baseType.DefinitionAssembly != null, "ResourceBuiltinTypeUnproven", "Builtin has no proven UnityEngine.Object ancestry: " + typeName);
+                assemblyName = baseType.DefinitionAssembly.Name.String; typeName = baseType.FullName;
+            }
+        }
+
+        /// <summary>Read-only diagnostic: records the actual members and persistent identities of one builtin container.</summary>
+        public static void InspectBuiltinResources()
+        {
+            string path = "Library/unity default resources";
+            var args = Environment.GetCommandLineArgs();
+            for (int i = 0; i + 1 < args.Length; ++i) if (args[i] == "-shadowBuiltinPath") path = args[i + 1];
+            var objects = AssetDatabase.LoadAllAssetsAtPath(path) ?? new UnityEngine.Object[0];
+            ShadowHash.Require(objects.Length <= 4096, "ResourceInspectionBound", "Builtin diagnostic is limited to 4096 objects; actual count=" + objects.Length);
+            var rows = new List<BuiltinInspectionRow>();
+            foreach (var asset in objects)
+            {
+                var row = new BuiltinInspectionRow { isNull = asset == null };
+                if (asset != null)
+                {
+                    row.name = asset.name; row.type = asset.GetType().AssemblyQualifiedName;
+                    row.assetPath = AssetDatabase.GetAssetPath(asset); row.persistent = EditorUtility.IsPersistent(asset);
+                    row.monoBehaviour = asset is MonoBehaviour; row.scriptableObject = asset is ScriptableObject;
+                    row.hasIdentity = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(asset, out row.guid, out row.localId);
+                    try { string json = EditorJsonUtility.ToJson(asset); row.jsonSha256 = ShadowHash.Text(json); row.jsonLength = json.Length; }
+                    catch (Exception ex) { row.serializationError = ex.GetType().FullName + ": " + ex.Message; }
+                }
+                rows.Add(row);
+            }
+            var report = new BuiltinInspection { unityVersion = Application.unityVersion, target = EditorUserBuildSettings.activeBuildTarget.ToString(),
+                path = path, pathGuid = AssetDatabase.AssetPathToGUID(path), objects = rows.ToArray() };
+            string output = Path.GetFullPath("_temp/AssemblyShadow/builtin-resource-inspection-" + Guid.NewGuid().ToString("N") + ".json");
+            Directory.CreateDirectory(Path.GetDirectoryName(output));
+            File.WriteAllText(output, JsonUtility.ToJson(report, true), new UTF8Encoding(false));
+            Debug.Log("[AssemblyShadow] Builtin resource inspection: " + output + "; objects=" + objects.Length +
+                "; legacy predicate failures=" + rows.Count(r => r.isNull || r.monoBehaviour || r.scriptableObject || !r.hasIdentity));
+        }
+
+        [Serializable] private sealed class BuiltinInspection { public string unityVersion, target, path, pathGuid; public BuiltinInspectionRow[] objects; }
+        [Serializable] private sealed class BuiltinInspectionRow
+        {
+            public string name, type, assetPath, guid, jsonSha256, serializationError;
+            public bool isNull, persistent, monoBehaviour, scriptableObject, hasIdentity;
+            public long localId;
+            public int jsonLength;
         }
 
         private static void RequireSourceUnchanged(ShadowResourceSource source)
@@ -497,8 +672,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             ShadowResourceSource source;
             ShadowHash.Require(sources.TryGetValue(path, out source), "ResourceSourceMissing", path);
+            if (source.builtin) { ShadowResourceBaseline.VerifyBuiltinSource(root, source); return new ResourceAssetReferences { guid = source.guid }; }
             string text = File.ReadAllText(ShadowHash.SafeChild(root, source.snapshotPath));
-            if (source.builtin) return new ResourceAssetReferences { guid = source.guid };
             var parsed = UnitySerializedReferenceParser.Parse(text, (guid, id) => {
                 ShadowResourceScript script;
                 return scripts.TryGetValue(guid + ":" + id, out script) ? new ResourceTypeIdentity { assembly = script.assembly, @namespace = script.@namespace, type = script.type } : null;

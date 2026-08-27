@@ -567,6 +567,66 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         }
 
         [Test]
+        public void PatchPolicyAllowsCandidateDemotionSoGraphReportsTheFullConsumerPath()
+        {
+            var policy = FilterSourcePolicy();
+            policy.assemblies = policy.assemblies.Concat(new[] { new AssemblyCapability { name = "BusinessConsumer",
+                classification = AssemblyClassification.Runtime, isShadowCapable = true, capabilityDeclared = true } }).ToArray();
+            var receipt = FilterReceipt(policy);
+            receipt.assemblies = new[] { FilterFile("Business"), FilterFile("BusinessConsumer") };
+            receipt.filteredAssemblyCapabilities = receipt.filteredAssemblyCapabilities.Where(item => item.name != "BusinessConsumer").ToArray();
+            receipt.linkedPlayerReceipt.protectedAssemblies = new[] { "business", "businessconsumer" };
+            receipt.linkedPlayerReceipt.assemblies = receipt.linkedPlayerReceipt.assemblies.Concat(new[] { new LinkedPlayerFile
+            {
+                name = "businessconsumer", path = "Assemblies/businessconsumer.dll", sha256 = ShadowHash.Text("stripped-businessconsumer"),
+                mvid = "7c6c0b71-2f0a-4f65-9a7f-78f06fb2f846"
+            } }).ToArray();
+            receipt.linkedPlayerReceiptHash = ShadowLinkedPlayerEvidence.ComputeHash(receipt.linkedPlayerReceipt);
+            receipt.snapshotHash = AssemblySnapshot.ComputeHash(receipt);
+            policy.assemblies.Single(item => item.name == "BusinessConsumer").isShadowCapable = false;
+
+            var derived = ShadowFilteredInputPolicy.ApplyPatch(policy, receipt, new[] { "Business", "BusinessConsumer" }, new string[0]);
+            var descriptors = derived.assemblies.Select(item => new AssemblyDescriptor { name = item.name,
+                references = item.name == "BusinessConsumer" ? new[] { "Business" } : new string[0], classification = item.classification,
+                isShadowCapable = item.isShadowCapable, isBootstrap = item.isBootstrap, isPrecompiled = item.isPrecompiled,
+                capabilityDeclared = item.capabilityDeclared }).ToArray();
+            var error = Assert.Throws<ShadowBuildException>(() => new AssemblyReferenceGraph(descriptors).ReverseClosure(new[] { "Business" }));
+            Assert.That(error.Code, Is.EqualTo("NonShadowConsumer"));
+            StringAssert.Contains("BusinessConsumer -> Business", error.Message);
+        }
+
+        [Test]
+        public void PatchPolicyRejectsPromotionOmissionBootstrapChangeAndRoleChange()
+        {
+            var policy = FilterSourcePolicy();
+            var receipt = FilterReceipt(policy);
+            policy.assemblies.Single(item => item.name == "Auxiliary").isShadowCapable = true;
+            Assert.That(Assert.Throws<ShadowBuildException>(() => ShadowFilteredInputPolicy.ApplyPatch(policy, receipt, new[] { "Business" }, new string[0])).Code,
+                Is.EqualTo("FilteredCandidatePromotion"));
+
+            policy = FilterSourcePolicy(); receipt = FilterReceipt(policy);
+            policy.assemblies = policy.assemblies.Where(item => item.name != "Business").ToArray();
+            Assert.That(Assert.Throws<ShadowBuildException>(() => ShadowFilteredInputPolicy.ApplyPatch(policy, receipt, new[] { "Business" }, new string[0])).Code,
+                Is.EqualTo("LinkedCandidateMissing"));
+
+            policy = FilterSourcePolicy(); receipt = FilterReceipt(policy);
+            policy.assemblies.Single(item => item.name == "Business").isBootstrap = true;
+            Assert.That(Assert.Throws<ShadowBuildException>(() => ShadowFilteredInputPolicy.ApplyPatch(policy, receipt, new[] { "Business" }, new string[0])).Code,
+                Is.EqualTo("LinkedBootstrapSetChanged"));
+
+            policy = FilterSourcePolicy(); receipt = FilterReceipt(policy);
+            policy.assemblies.Single(item => item.name == "Business").classification = AssemblyClassification.EditorOnly;
+            Assert.That(Assert.Throws<ShadowBuildException>(() => ShadowFilteredInputPolicy.ApplyPatch(policy, receipt, new[] { "Business" }, new string[0])).Code,
+                Is.EqualTo("LinkedCandidateRoleChanged"));
+
+            policy = FilterSourcePolicy(); receipt = FilterReceipt(policy);
+            var bootstrap = policy.assemblies.Single(item => item.name == "Business");
+            bootstrap.isShadowCapable = false; bootstrap.isBootstrap = true; bootstrap.classification = AssemblyClassification.EditorOnly;
+            Assert.That(Assert.Throws<ShadowBuildException>(() => ShadowFilteredInputPolicy.ApplyPatch(policy, receipt, new string[0], new[] { "Business" })).Code,
+                Is.EqualTo("LinkedBootstrapRoleChanged"));
+        }
+
+        [Test]
         public void LinkerExcludedOrdinaryHotUpdateRemainsAConsumer()
         {
             var policy = FilterSourcePolicy(); var receipt = FilterReceipt(policy);

@@ -33,7 +33,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 "BaselineResourceIndexMismatch", "Baseline index does not match its frozen bundle build.");
             var frozenReceipt = AssemblySnapshot.ReadAndVerify(Path.Combine(baselineRoot, baseline.playerInputSnapshot), true);
             ShadowHash.Require(frozenReceipt.snapshotHash == baseline.playerInputSnapshotHash, "BaselineInputMismatch", baselineRoot);
-            var policy = ShadowFilteredInputPolicy.Apply(request.policy, frozenReceipt);
+            var policy = ShadowFilteredInputPolicy.ApplyPatch(request.policy, frozenReceipt, baseline.shadowCandidates, baseline.bootstrapAssemblies);
             ShadowReflectionBindingEvidence.RequirePolicy(policy, request.currentCompileSnapshot, receipt, false);
             ShadowHash.Require((policy.reflectionBindingConfigurationHash ?? "") == (baseline.reflectionBindingConfigurationHash ?? ""),
                 "ReflectionBindingPolicyChanged", "Changing a fixed AOT reflection contract requires a new Player baseline.");

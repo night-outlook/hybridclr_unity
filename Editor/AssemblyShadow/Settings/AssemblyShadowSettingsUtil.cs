@@ -246,8 +246,21 @@ namespace HybridCLR.Editor.AssemblyShadow
             string json = ReadTextAssetOrPath(settings.explicitDependencyConfig, settings.explicitDependencyConfigPath, DefaultDependencyConfigPath);
             if (string.IsNullOrWhiteSpace(json))
                 return new ShadowDependencyConfiguration();
-            var result = JsonUtility.FromJson<ShadowDependencyConfiguration>(json);
-            return result ?? new ShadowDependencyConfiguration();
+            try
+            {
+                var result = JsonUtility.FromJson<ShadowDependencyConfiguration>(json);
+                if (result == null)
+                    throw new InvalidOperationException("The source did not contain a dependency configuration object.");
+                return result;
+            }
+            catch (ShadowBuildException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                throw new ShadowBuildException("InvalidPolicySource", "Dependency configuration is invalid: " + exception.Message);
+            }
         }
 
         private static ExtensibilityWhitelist LoadWhitelist(AssemblyShadowSettings settings)
@@ -255,23 +268,91 @@ namespace HybridCLR.Editor.AssemblyShadow
             string json = ReadTextAssetOrPath(settings.extensibilityWhitelist, settings.extensibilityWhitelistPath, DefaultWhitelistPath);
             if (string.IsNullOrWhiteSpace(json))
                 return new ExtensibilityWhitelist();
-            var result = JsonUtility.FromJson<ExtensibilityWhitelist>(json);
-            return result ?? new ExtensibilityWhitelist();
+            try
+            {
+                var result = JsonUtility.FromJson<ExtensibilityWhitelist>(json);
+                if (result == null)
+                    throw new InvalidOperationException("The source did not contain an extensibility whitelist object.");
+                return result;
+            }
+            catch (ShadowBuildException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                throw new ShadowBuildException("InvalidPolicySource", "Extensibility whitelist is invalid: " + exception.Message);
+            }
         }
 
         private static string ReadTextAssetOrPath(TextAsset asset, string configuredPath, string fallbackPath)
         {
-            if (asset != null && !string.IsNullOrWhiteSpace(asset.text))
+            if (asset != null)
+            {
+                if (string.IsNullOrWhiteSpace(asset.text))
+                    throw new ShadowBuildException("InvalidPolicySource", "An explicitly assigned policy TextAsset is empty.");
                 return asset.text;
-            string path = string.IsNullOrWhiteSpace(configuredPath) ? fallbackPath : configuredPath;
-            if (!Path.IsPathRooted(path))
-                path = Path.Combine(Directory.GetParent(Application.dataPath).FullName, path);
-            if (File.Exists(path))
-                return File.ReadAllText(path);
-            string fallback = fallbackPath;
-            if (!Path.IsPathRooted(fallback))
-                fallback = Path.Combine(Directory.GetParent(Application.dataPath).FullName, fallback);
-            return File.Exists(fallback) ? File.ReadAllText(fallback) : string.Empty;
+            }
+
+            bool customPath = !string.IsNullOrWhiteSpace(configuredPath) && !PathsEqual(configuredPath, fallbackPath);
+            string path;
+            try
+            {
+                path = ResolveProjectPath(customPath ? configuredPath : fallbackPath);
+            }
+            catch (ShadowBuildException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                throw new ShadowBuildException("InvalidPolicySource", "The explicitly configured policy source path is invalid: " + exception.Message);
+            }
+            if (!File.Exists(path))
+            {
+                if (customPath)
+                    throw new ShadowBuildException("InvalidPolicySource", "The explicitly configured policy source does not exist: " + configuredPath);
+                // A missing default means that no optional policy has been authored.
+                return string.Empty;
+            }
+
+            try
+            {
+                string text = File.ReadAllText(path);
+                if (customPath && string.IsNullOrWhiteSpace(text))
+                    throw new ShadowBuildException("InvalidPolicySource", "The explicitly configured policy source is empty: " + configuredPath);
+                return text;
+            }
+            catch (ShadowBuildException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                throw new ShadowBuildException("InvalidPolicySource", "The policy source could not be read: " + path + ". " + exception.Message);
+            }
+        }
+
+        private static string ResolveProjectPath(string path)
+        {
+            if (Path.IsPathRooted(path))
+                return Path.GetFullPath(path);
+            DirectoryInfo project = Directory.GetParent(Application.dataPath);
+            if (project == null)
+                throw new ShadowBuildException("InvalidPolicySource", "The Unity project root could not be resolved.");
+            return Path.GetFullPath(Path.Combine(project.FullName, path));
+        }
+
+        private static bool PathsEqual(string left, string right)
+        {
+            try
+            {
+                return string.Equals(ResolveProjectPath(left), ResolveProjectPath(right), StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception)
+            {
+                return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+            }
         }
 
         private static void AddDuplicates(List<string> errors, IEnumerable<string> values, string prefix)

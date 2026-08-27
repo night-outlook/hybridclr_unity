@@ -20,6 +20,7 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             private readonly CompiledAssemblySet set;
             private readonly List<TypeDef> allTypes;
+            private readonly HashSet<string> requestedAssemblies = new HashSet<string>(StringComparer.Ordinal);
             private static readonly HashSet<string> UnityValues = new HashSet<string>(new[] {
                 "UnityEngine.Vector2", "UnityEngine.Vector3", "UnityEngine.Vector4", "UnityEngine.Vector2Int", "UnityEngine.Vector3Int",
                 "UnityEngine.Rect", "UnityEngine.RectInt", "UnityEngine.Bounds", "UnityEngine.BoundsInt", "UnityEngine.Quaternion",
@@ -36,6 +37,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             public ResourceAbiDescriptor Run(IEnumerable<string> assemblyNames)
             {
                 var requested = new HashSet<string>((assemblyNames ?? Enumerable.Empty<string>()).Select(AssemblyIdentityUtil.CanonicalName), StringComparer.Ordinal);
+                requestedAssemblies.UnionWith(requested);
                 var pending = new Queue<TypeDef>();
                 foreach (var type in allTypes.Where(t => !IsEngine(t) && (requested.Count == 0 || requested.Contains(Assembly(t)))))
                 {
@@ -211,68 +213,141 @@ namespace HybridCLR.Editor.AssemblyShadow
 
             private string CallbackHash(IEnumerable<TypeDef> chain, ISet<string> unknown)
             {
-                var roots = chain.SelectMany(t => t.Methods).Where(m => m.Name == "OnBeforeSerialize" || m.Name == "OnAfterDeserialize" ||
-                    m.Name.String.EndsWith(".OnBeforeSerialize", StringComparison.Ordinal) || m.Name.String.EndsWith(".OnAfterDeserialize", StringComparison.Ordinal)).ToList();
-                if (roots.Count == 0) unknown.Add("serialization callback implementation unresolved");
-                var pending = new Queue<MethodDef>(roots);
-                var methods = new SortedDictionary<string, string>(StringComparer.Ordinal);
-                while (pending.Count != 0)
-                {
-                    var method = pending.Dequeue();
-                    string key = Key(method.DeclaringType) + ":" + method.FullName;
-                    if (methods.ContainsKey(key)) continue;
-                    var writer = new CanonicalSignatureWriter();
-                    writer.Line(key); writer.Line(method.Attributes.ToString()); writer.Line(method.ImplAttributes.ToString());
-                    if (!method.HasBody) unknown.Add("serialization callback body unavailable: " + key);
-                    else
-                    {
-                        var body = method.Body;
-                        writer.Line("init:" + body.InitLocals);
-                        foreach (var local in body.Variables) writer.Line("local:" + local.Type.FullName);
-                        foreach (var instruction in body.Instructions)
-                        {
-                            writer.Token(instruction.OpCode.Code.ToString());
-                            writer.Line(Operand(instruction.Operand, body.Instructions));
-                            var called = instruction.Operand as IMethod;
-                            if (called != null && called.DeclaringType != null &&
-                                (called.DeclaringType.FullName.StartsWith("System.Reflection.", StringComparison.Ordinal) ||
-                                 called.DeclaringType.FullName == "System.Type" || called.DeclaringType.FullName == "System.Activator"))
-                                unknown.Add("callback reflection behavior cannot be proven: " + called.FullName);
-                            if (called == null || called.DeclaringType == null || IsEngine(called.DeclaringType) || IsCore(called.DeclaringType)) continue;
-                            var declaring = set.ResolveType(called.DeclaringType);
-                            var definition = declaring == null ? null : declaring.Methods.FirstOrDefault(m => m.Name == called.Name && new SigComparer().Equals(m.MethodSig, called.MethodSig));
-                            if (definition == null) unknown.Add("callback dependency unresolved: " + called.FullName);
-                            else pending.Enqueue(definition);
-                            if (instruction.OpCode.Code == Code.Callvirt && (definition == null || definition.IsVirtual)) unknown.Add("callback virtual dispatch cannot be proven: " + called.FullName);
-                        }
-                        foreach (var handler in body.ExceptionHandlers)
-                            writer.Line("eh:" + handler.HandlerType + ":" + body.Instructions.IndexOf(handler.TryStart) + ":" + body.Instructions.IndexOf(handler.TryEnd) + ":" +
-                                body.Instructions.IndexOf(handler.HandlerStart) + ":" + body.Instructions.IndexOf(handler.HandlerEnd) + ":" + body.Instructions.IndexOf(handler.FilterStart) + ":" + Key(handler.CatchType));
-                    }
-                    methods.Add(key, writer.ToString());
-                }
-                return "sha256:" + ShadowHash.Text(string.Join("\n", methods.Values.ToArray()));
+                return new CallbackDependencyClosure(set, unknown, IsEngine).Compute(chain);
             }
 
-            private static string Operand(object value, IList<Instruction> instructions)
+            private sealed class CallbackDependencyClosure
             {
-                if (value == null) return string.Empty;
-                var branch = value as Instruction; if (branch != null) return "branch:" + instructions.IndexOf(branch);
-                var branches = value as IList<Instruction>; if (branches != null) return "switch:" + string.Join(",", branches.Select(i => instructions.IndexOf(i).ToString(CultureInfo.InvariantCulture)).ToArray());
-                var local = value as Local; if (local != null) return "local:" + local.Index;
-                var parameter = value as Parameter; if (parameter != null) return "parameter:" + parameter.Index;
-                var type = value as ITypeDefOrRef; if (type != null) return Key(type);
-                var member = value as IMemberRef; if (member != null) return Key(member.DeclaringType) + ":" + member.FullName;
-                return Convert.ToString(value, CultureInfo.InvariantCulture);
+                private readonly CompiledAssemblySet set;
+                private readonly ISet<string> unknown;
+                private readonly Func<ITypeDefOrRef, bool> isEngine;
+                private readonly Queue<MethodDef> pending = new Queue<MethodDef>();
+                private readonly HashSet<string> methods = new HashSet<string>(StringComparer.Ordinal);
+                private readonly HashSet<string> initializedTypes = new HashSet<string>(StringComparer.Ordinal);
+                private readonly SortedDictionary<string, string> entries = new SortedDictionary<string, string>(StringComparer.Ordinal);
+
+                public CallbackDependencyClosure(CompiledAssemblySet set, ISet<string> unknown, Func<ITypeDefOrRef, bool> isEngine)
+                {
+                    this.set = set;
+                    this.unknown = unknown;
+                    this.isEngine = isEngine;
+                }
+
+                private bool IsEngine(ITypeDefOrRef type) { return isEngine(type); }
+
+                public string Compute(IEnumerable<TypeDef> chain)
+                {
+                    foreach (var type in chain)
+                    {
+                        foreach (var method in type.Methods.Where(m => m.Name == "OnBeforeSerialize" || m.Name == "OnAfterDeserialize" ||
+                            m.Name.String.EndsWith(".OnBeforeSerialize", StringComparison.Ordinal) || m.Name.String.EndsWith(".OnAfterDeserialize", StringComparison.Ordinal)))
+                            pending.Enqueue(method);
+                    }
+                    if (pending.Count == 0) unknown.Add("serialization callback implementation unresolved");
+                    while (pending.Count != 0)
+                    {
+                        var method = pending.Dequeue();
+                        string key = AssemblySemanticHasher.MethodRefText(method);
+                        if (!methods.Add(key)) continue;
+                        entries["method:" + key] = AssemblySemanticHasher.MethodSemanticText(method);
+                        TrackInitialization(method.DeclaringType);
+                        if (!method.HasBody || method.IsPinvokeImpl || method.NativeBody != null)
+                        {
+                            unknown.Add("serialization callback body unavailable: " + key);
+                            continue;
+                        }
+                        foreach (var instruction in method.Body.Instructions)
+                        {
+                            if (instruction.OpCode.Code == Code.Calli || instruction.OpCode.Code == Code.Ldftn || instruction.OpCode.Code == Code.Ldvirtftn)
+                                unknown.Add("callback indirect or delegate dispatch cannot be proven: " + key);
+                            // MemberRef implements both interfaces, so inspect the signature
+                            // before choosing a field or method dependency.
+                            var member = instruction.Operand as MemberRef;
+                            var field = member != null ? (member.IsFieldRef ? (IField)member : null) : instruction.Operand as IField;
+                            if (field != null) { TrackField(field); continue; }
+                            var called = member != null ? (member.IsMethodRef ? (IMethod)member : null) : instruction.Operand as IMethod;
+                            if (called != null) TrackMethod(called, instruction.OpCode.Code);
+                        }
+                    }
+                    var writer = new CanonicalSignatureWriter();
+                    // Old weak callback hashes can never compare equal after this upgrade.
+                    writer.Line("resource-callback-dependencies-v2");
+                    foreach (var entry in entries) { writer.Line(entry.Key); writer.Line(entry.Value); }
+                    return "sha256:" + ShadowHash.Text(writer.ToString());
+                }
+
+                private void TrackInitialization(TypeDef type)
+                {
+                    if (type == null || IsCore(type) || IsEngine(type) || !initializedTypes.Add(Key(type))) return;
+                    // BeforeFieldInit and module initialization affect when callback-observed
+                    // static state is populated even when IL never directly calls .cctor.
+                    entries["initialization:" + Key(type)] = type.Attributes.ToString();
+                    foreach (var initializer in type.Methods.Where(m => m.IsStaticConstructor)) pending.Enqueue(initializer);
+                    if (type.Module != null && type.Module.GlobalType != null && type != type.Module.GlobalType)
+                        TrackInitialization(type.Module.GlobalType);
+                    if (type.BaseType == null || IsTerminal(type.BaseType)) return;
+                    var parent = set.ResolveType(type.BaseType);
+                    if (parent == null) unknown.Add("callback initialization base unresolved: " + Key(type.BaseType));
+                    else TrackInitialization(parent);
+                }
+
+                private void TrackField(IField reference)
+                {
+                    string key = AssemblySemanticHasher.FieldRefText(reference);
+                    var declaring = set.ResolveType(reference.DeclaringType);
+                    var matches = declaring == null ? new FieldDef[0] : declaring.Fields.Where(f => f.Name == reference.Name &&
+                        new SigComparer().Equals(f.FieldSig, reference.FieldSig)).ToArray();
+                    if (matches.Length != 1) { unknown.Add("callback field dependency unresolved or ambiguous: " + key); return; }
+                    var field = matches[0];
+                    entries["field:" + key] = AssemblySemanticHasher.FieldSemanticText(field);
+                    if (!field.IsStatic) return;
+                    TrackInitialization(declaring);
+                    if (reference.DeclaringType is TypeSpec || declaring.HasGenericParameters)
+                        unknown.Add("callback generic static initialization cannot be proven: " + key);
+                    if (IsCore(declaring) || IsEngine(declaring))
+                        unknown.Add("callback runtime static state cannot be proven: " + key);
+                    if (!field.IsLiteral && !field.IsInitOnly)
+                        unknown.Add("callback mutable static state cannot be proven: " + key);
+                    else if (!field.IsLiteral && !IsPrimitive(field.FieldType.ElementType))
+                        unknown.Add("callback mutable static object state cannot be proven: " + key);
+                }
+
+                private void TrackMethod(IMethod reference, Code operation)
+                {
+                    string key = AssemblySemanticHasher.MethodRefText(reference);
+                    var specification = reference as MethodSpec;
+                    var target = specification == null ? reference : specification.Method;
+                    var declaring = set.ResolveType(target.DeclaringType);
+                    var matches = declaring == null ? new MethodDef[0] : declaring.Methods.Where(m => m.Name == target.Name &&
+                        new SigComparer().Equals(m.MethodSig, target.MethodSig)).ToArray();
+                    if (matches.Length != 1) { unknown.Add("callback method dependency unresolved or ambiguous: " + key); return; }
+                    var definition = matches[0];
+                    if (operation == Code.Ldvirtftn || (operation == Code.Callvirt && definition.IsVirtual))
+                        unknown.Add("callback virtual dispatch cannot be proven: " + key);
+                    if (specification != null || target.DeclaringType is TypeSpec || definition.HasGenericParameters || declaring.HasGenericParameters)
+                        unknown.Add("callback generic execution cannot be proven: " + key);
+                    if (declaring.FullName.StartsWith("System.Reflection.", StringComparison.Ordinal) ||
+                        declaring.FullName == "System.Type" || declaring.FullName == "System.Activator")
+                        unknown.Add("callback reflection behavior cannot be proven: " + key);
+                    if (IsCore(declaring) || IsEngine(declaring))
+                    {
+                        // A pinned runtime reference is not proof of deterministic callback
+                        // effects (native calls, delegates, clocks, reflection, global state).
+                        unknown.Add("callback external runtime behavior cannot be proven: " + key);
+                        return;
+                    }
+                    TrackInitialization(declaring);
+                    pending.Enqueue(definition);
+                }
             }
 
-            private static bool IsSerializedField(FieldDef field)
+            private bool IsSerializedField(FieldDef field)
             {
                 return !field.IsStatic && !field.IsLiteral && !field.IsInitOnly && !field.IsNotSerialized && !Has(field, "System.NonSerializedAttribute") &&
                     (field.IsPublic || Has(field, "UnityEngine.SerializeField") || Has(field, "UnityEngine.SerializeReference"));
             }
-            private static bool Serializable(TypeDef type) { return type.IsSerializable || Has(type, "System.SerializableAttribute"); }
-            private static bool Has(IHasCustomAttribute value, string name)
+            private bool Serializable(TypeDef type) { return type.IsSerializable || Has(type, "System.SerializableAttribute"); }
+            private bool Has(IHasCustomAttribute value, string name)
             {
                 return value.CustomAttributes.Any(a => AttributeName(a) == name &&
                     (name.StartsWith("UnityEngine.", StringComparison.Ordinal) ? IsEngine(a.AttributeType) : IsCore(a.AttributeType)));
@@ -282,7 +357,14 @@ namespace HybridCLR.Editor.AssemblyShadow
             private static bool IsTerminal(ITypeDefOrRef type) { return IsCore(type) && (type.FullName == "System.Object" || type.FullName == "System.ValueType" || type.FullName == "System.Enum"); }
             private static bool IsSystem(TypeDef type) { return IsCore(type); }
             private static bool IsCore(ITypeDefOrRef type) { string assembly = Assembly(type); return assembly == "mscorlib" || assembly == "netstandard" || assembly == "system.runtime" || assembly == "system.private.corelib"; }
-            private static bool IsEngine(ITypeDefOrRef type) { string assembly = Assembly(type); return assembly == "unityengine" || assembly.StartsWith("unityengine.", StringComparison.Ordinal); }
+            private bool IsEngine(ITypeDefOrRef type)
+            {
+                string assembly = Assembly(type);
+                // A name is not framework provenance. Only explicitly supplied reference
+                // modules can be a framework boundary; candidates/snapshot DLLs never are.
+                return !requestedAssemblies.Contains(assembly) && !set.Assemblies.ContainsKey(assembly) && set.Modules.ContainsKey(assembly) &&
+                    (assembly == "unityengine" || assembly.StartsWith("unityengine.", StringComparison.Ordinal));
+            }
             private static string Assembly(ITypeDefOrRef type) { return type == null || type.DefinitionAssembly == null ? string.Empty : AssemblyIdentityUtil.CanonicalName(type.DefinitionAssembly.Name); }
             private static string Key(ITypeDefOrRef type) { return AssemblyIdentityUtil.TypeKey(type); }
             private static string Namespace(TypeDef type) { while (type.DeclaringType != null) type = type.DeclaringType; return type.Namespace; }

@@ -121,6 +121,22 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         }
 
         [Test]
+        public void RequestedUnityEnginePrefixedCandidateIsNotAFrameworkBoundary()
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                fixture.Module.Assembly.Name = "UnityEngine.Gameplay";
+                var value = fixture.Field(fixture.Root, "Value", fixture.Module.CorLibTypes.Int32);
+                var baseline = fixture.Analyze();
+                Assert.IsEmpty(baseline.unknowns);
+                Assert.AreEqual(1, baseline.types.Length);
+                value.FieldSig = new FieldSig(fixture.Module.CorLibTypes.String);
+                var current = fixture.Analyze();
+                Assert.AreEqual(ResourceAbiDiffLevel.ResourceRebuildRequired, ResourceAbiDiff.Compare(baseline, current).level);
+            }
+        }
+
+        [Test]
         public void UnityYamlUsesScriptGuidAndFileIdAndManagedReferenceMetadataOnly()
         {
             const string guid = "0123456789abcdef0123456789abcdef";
@@ -155,6 +171,201 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 Assert.AreEqual(ResourceAbiDiffLevel.None, ResourceAbiDiff.Compare(baseline, fixture.Analyze()).level);
                 beforeMethod.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Nop));
                 Assert.AreEqual(ResourceAbiDiffLevel.UnknownRequiresReview, ResourceAbiDiff.Compare(baseline, fixture.Analyze()).level);
+            }
+        }
+
+        [Test]
+        public void CallbackHashPreservesAdjacentFloatAndDoubleOperandBits()
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                fixture.CallbackContract();
+                var single = fixture.Field(fixture.Root, "Single", fixture.Module.CorLibTypes.Single);
+                var twice = fixture.Field(fixture.Root, "Double", fixture.Module.CorLibTypes.Double);
+                var callback = fixture.Callback("OnAfterDeserialize");
+                var singleValue = Instruction.Create(OpCodes.Ldc_R4, 1.0f);
+                var doubleValue = Instruction.Create(OpCodes.Ldc_R8, 1.0d);
+                callback.Body.Instructions.Clear();
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                callback.Body.Instructions.Add(singleValue);
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Stfld, single));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                callback.Body.Instructions.Add(doubleValue);
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Stfld, twice));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var baseline = fixture.Analyze();
+                singleValue.Operand = BitConverter.ToSingle(BitConverter.GetBytes(0x3f800001), 0);
+                var changedSingle = fixture.Analyze();
+                Assert.AreNotEqual(CallbackHash(baseline), CallbackHash(changedSingle), "Adjacent float constants must not round to the same callback hash.");
+                Assert.AreEqual(ResourceAbiDiffLevel.UnknownRequiresReview, ResourceAbiDiff.Compare(baseline, changedSingle).level);
+                singleValue.Operand = 1.0f;
+                doubleValue.Operand = BitConverter.Int64BitsToDouble(0x3ff0000000000001L);
+                var changedDouble = fixture.Analyze();
+                Assert.AreNotEqual(CallbackHash(baseline), CallbackHash(changedDouble), "Adjacent double constants must not round to the same callback hash.");
+                Assert.AreEqual(ResourceAbiDiffLevel.UnknownRequiresReview, ResourceAbiDiff.Compare(baseline, changedDouble).level);
+            }
+        }
+
+        [Test]
+        public void CallbackStaticFieldReadIncludesHelperTypeInitializer()
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                fixture.CallbackContract();
+                var value = fixture.Field(fixture.Root, "Value", fixture.Module.CorLibTypes.Int32);
+                var helper = fixture.Type("Helper");
+                var defaultValue = fixture.Field(helper, "DefaultValue", fixture.Module.CorLibTypes.Int32);
+                defaultValue.IsStatic = true;
+                var initializer = fixture.StaticInitializer(helper);
+                var constant = Instruction.Create(OpCodes.Ldc_I4, 1);
+                initializer.Body.Instructions.Clear();
+                initializer.Body.Instructions.Add(constant);
+                initializer.Body.Instructions.Add(Instruction.Create(OpCodes.Stsfld, defaultValue));
+                initializer.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var callback = fixture.Callback("OnAfterDeserialize");
+                callback.Body.Instructions.Clear();
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldsfld, defaultValue));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Stfld, value));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var baseline = fixture.Analyze();
+                constant.Operand = 2;
+                var changed = fixture.Analyze();
+                Assert.AreNotEqual(CallbackHash(baseline), CallbackHash(changed), "A callback observes helper initialization even without a direct call to .cctor.");
+                Assert.AreEqual(ResourceAbiDiffLevel.UnknownRequiresReview, ResourceAbiDiff.Compare(baseline, changed).level);
+                Assert.That(changed.unknowns.Any(s => s.Contains("mutable static")), "Other writes to mutable static state cannot be proved from the callback call graph.");
+            }
+        }
+
+        [Test]
+        public void ReadonlyStaticInitializationCanRemainStableButModuleChangesCannot()
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                fixture.CallbackContract();
+                var helper = fixture.Type("Helper");
+                var value = fixture.Field(helper, "Value", fixture.Module.CorLibTypes.Int32);
+                value.Attributes = FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.InitOnly;
+                var initialize = fixture.StaticInitializer(helper);
+                initialize.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Ldc_I4, 7));
+                initialize.Body.Instructions.Insert(1, Instruction.Create(OpCodes.Stsfld, value));
+                var moduleInitialize = fixture.StaticInitializer(fixture.Module.GlobalType);
+                var callback = fixture.Callback("OnAfterDeserialize");
+                callback.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Ldsfld, value));
+                callback.Body.Instructions.Insert(1, Instruction.Create(OpCodes.Pop));
+                var baseline = fixture.Analyze();
+                Assert.IsEmpty(baseline.unknowns);
+                Assert.AreEqual(ResourceAbiDiffLevel.None, ResourceAbiDiff.Compare(baseline, fixture.Analyze()).level);
+                moduleInitialize.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Nop));
+                var changedModule = fixture.Analyze();
+                Assert.AreNotEqual(CallbackHash(baseline), CallbackHash(changedModule));
+                Assert.AreEqual(ResourceAbiDiffLevel.UnknownRequiresReview, ResourceAbiDiff.Compare(baseline, changedModule).level);
+                moduleInitialize.Body.Instructions.RemoveAt(0);
+                helper.IsBeforeFieldInit = !helper.IsBeforeFieldInit;
+                Assert.AreNotEqual(CallbackHash(baseline), CallbackHash(fixture.Analyze()), "Type initialization timing is observable to callbacks.");
+            }
+        }
+
+        [Test]
+        public void CallbackMemberFieldSignatureKeepsReferencedAssemblyIdentity()
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                fixture.CallbackContract();
+                var helper = fixture.Type("Helper");
+                var firstType = new ClassSig(new TypeRefUser(fixture.Module, "Same", "Payload", new AssemblyRefUser("First")));
+                var secondType = new ClassSig(new TypeRefUser(fixture.Module, "Same", "Payload", new AssemblyRefUser("Second")));
+                var field = fixture.Field(helper, "Value", firstType);
+                field.Attributes = FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.InitOnly;
+                var reference = new MemberRefUser(fixture.Module, "Value", new FieldSig(firstType), helper);
+                var callback = fixture.Callback("OnAfterDeserialize");
+                callback.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Ldsfld, reference));
+                callback.Body.Instructions.Insert(1, Instruction.Create(OpCodes.Pop));
+                var baseline = fixture.Analyze();
+                string display = reference.FullName;
+                field.FieldSig = new FieldSig(secondType); reference.FieldSig = new FieldSig(secondType);
+                Assert.AreEqual(display, reference.FullName, "The display name deliberately hides this assembly difference.");
+                var changed = fixture.Analyze();
+                Assert.AreNotEqual(CallbackHash(baseline), CallbackHash(changed));
+                Assert.AreEqual(ResourceAbiDiffLevel.UnknownRequiresReview, ResourceAbiDiff.Compare(baseline, changed).level);
+            }
+        }
+
+        [Test]
+        public void CallbackMethodSpecKeepsGenericArgumentAssemblyIdentity()
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                fixture.CallbackContract();
+                var helper = fixture.Type("Helper");
+                var signature = MethodSig.CreateStatic(fixture.Module.CorLibTypes.Void);
+                signature.CallingConvention |= CallingConvention.Generic;
+                signature.GenParamCount = 1;
+                var generic = new MethodDefUser("Accept", signature, MethodImplAttributes.IL, MethodAttributes.Public | MethodAttributes.Static);
+                generic.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+                generic.Body = new CilBody(); generic.Body.Instructions.Add(Instruction.Create(OpCodes.Ret)); helper.Methods.Add(generic);
+                var argument = new ClassSig(new TypeRefUser(fixture.Module, "Same", "Payload", new AssemblyRefUser("First")));
+                var specification = new MethodSpecUser(generic, new GenericInstMethodSig(argument));
+                var callback = fixture.Callback("OnAfterDeserialize");
+                callback.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Call, specification));
+                var baseline = fixture.Analyze();
+                specification.GenericInstMethodSig.GenericArguments[0] = new ClassSig(new TypeRefUser(fixture.Module, "Same", "Payload", new AssemblyRefUser("Second")));
+                var changed = fixture.Analyze();
+                Assert.AreNotEqual(CallbackHash(baseline), CallbackHash(changed));
+                Assert.That(changed.unknowns.Any(s => s.Contains("generic execution")));
+            }
+        }
+
+        [Test]
+        public void CallbackUnresolvedVirtualAndIndirectDispatchRemainUnknown()
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                fixture.CallbackContract();
+                var callback = fixture.Callback("OnAfterDeserialize");
+                var missing = new MemberRefUser(fixture.Module, "Invoke", MethodSig.CreateStatic(fixture.Module.CorLibTypes.Void),
+                    new TypeRefUser(fixture.Module, "Absent", "Helper", new AssemblyRefUser("Missing")));
+                callback.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Call, missing));
+                Assert.That(fixture.Analyze().unknowns.Any(s => s.Contains("method dependency unresolved")));
+                callback.Body.Instructions.RemoveAt(0);
+                var helper = fixture.Type("Helper");
+                var virtualMethod = new MethodDefUser("Invoke", MethodSig.CreateInstance(fixture.Module.CorLibTypes.Void), MethodImplAttributes.IL,
+                    MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.NewSlot);
+                virtualMethod.Body = new CilBody(); virtualMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret)); helper.Methods.Add(virtualMethod);
+                callback.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Ldnull));
+                callback.Body.Instructions.Insert(1, Instruction.Create(OpCodes.Callvirt, virtualMethod));
+                Assert.That(fixture.Analyze().unknowns.Any(s => s.Contains("virtual dispatch")));
+                callback.Body.Instructions.Clear();
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Conv_I));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Calli, MethodSig.CreateStatic(fixture.Module.CorLibTypes.Void)));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                Assert.That(fixture.Analyze().unknowns.Any(s => s.Contains("indirect or delegate dispatch")));
+            }
+        }
+
+        private static string CallbackHash(ResourceAbiDescriptor descriptor)
+        { return descriptor.types.Single(t => t.type == "Root").callbackSemanticHash; }
+
+        [Test]
+        public void SharedMethodAndFieldWriterExtractionPreservesAssemblyHashBytes()
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                var field = fixture.Field(fixture.Root, "Value", fixture.Module.CorLibTypes.Double);
+                fixture.Attribute(field, "SerializeField");
+                var constant = fixture.Field(fixture.Root, "Constant", fixture.Module.CorLibTypes.Int32);
+                constant.Attributes = FieldAttributes.Public | FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.HasDefault;
+                constant.Constant = new ConstantUser(7);
+                var callback = fixture.Callback("OnAfterDeserialize");
+                callback.Body.Instructions.Clear();
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_R8, BitConverter.Int64BitsToDouble(0x3ff0000000000001L)));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Stfld, field));
+                callback.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                // Captured before extracting the shared method/field writers. This locks the
+                // existing assembly-hash schema bytes, not the callback-specific hash version.
+                Assert.AreEqual("c3e1b8b1c4c8ddbba1e8dfcc55ed420b3ba0aada311e50ae06c93089384892f0", AssemblySemanticHasher.Compute(fixture.Module).semanticHash);
             }
         }
 
@@ -246,7 +457,8 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 var obj = new TypeDefUser("UnityEngine", "Object", Engine.CorLibTypes.Object.TypeDefOrRef); Engine.Types.Add(obj);
                 var mono = new TypeDefUser("UnityEngine", "MonoBehaviour", obj); Engine.Types.Add(mono);
                 Root = Type("Root"); Root.BaseType = new TypeRefUser(Module, "UnityEngine", "MonoBehaviour", Engine.Assembly.ToAssemblyRef());
-                Directory.CreateDirectory(directory);
+                Directory.CreateDirectory(Path.Combine(directory, "Snapshot"));
+                Directory.CreateDirectory(Path.Combine(directory, "References"));
             }
             public TypeDef Type(string name, bool serializable = false)
             {
@@ -265,10 +477,20 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 var method = new MethodDefUser(name, MethodSig.CreateInstance(Module.CorLibTypes.Void), MethodImplAttributes.IL | MethodImplAttributes.Managed, MethodAttributes.Public);
                 method.Body = new CilBody(); method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret)); Root.Methods.Add(method); return method;
             }
+            public void CallbackContract()
+            { Root.Interfaces.Add(new InterfaceImplUser(new TypeRefUser(Module, "UnityEngine", "ISerializationCallbackReceiver", Engine.Assembly.ToAssemblyRef()))); }
+            public MethodDef StaticInitializer(TypeDef type)
+            {
+                var method = new MethodDefUser(".cctor", MethodSig.CreateStatic(Module.CorLibTypes.Void), MethodImplAttributes.IL | MethodImplAttributes.Managed,
+                    MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName);
+                method.Body = new CilBody(); method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret)); type.Methods.Add(method); return method;
+            }
             public ResourceAbiDescriptor Analyze()
             {
-                Module.Write(Path.Combine(directory, "Fixture.dll")); Engine.Write(Path.Combine(directory, "UnityEngine.CoreModule.dll"));
-                using (var set = DnlibAssemblyLoader.Load(directory, null, null, false)) return UnitySerializedTypeAnalyzer.Analyze(set, new[] { "Fixture" });
+                string snapshot = Path.Combine(directory, "Snapshot"), references = Path.Combine(directory, "References");
+                Module.Write(Path.Combine(snapshot, Module.Assembly.Name + ".dll")); Engine.Write(Path.Combine(references, "UnityEngine.CoreModule.dll"));
+                using (var set = DnlibAssemblyLoader.Load(snapshot, new[] { references }, null, false))
+                    return UnitySerializedTypeAnalyzer.Analyze(set, new[] { Module.Assembly.Name.String });
             }
             private static ModuleDefUser CreateModule(string name)
             { var module = new ModuleDefUser(name + ".dll") { Kind = ModuleKind.Dll }; new AssemblyDefUser(name, new Version(1, 0, 0, 0)).Modules.Add(module); return module; }

@@ -122,17 +122,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 }
                 foreach (FieldDef field in type.Fields)
                 {
-                    writer.Line("field:" + FieldKey(field));
-                    writer.Line(field.Attributes.ToString());
-                    writer.Line(field.FieldType == null ? string.Empty : SigText(field.FieldType));
-                    writer.Line("offset:" + (field.FieldOffset.HasValue ? Invariant(field.FieldOffset.Value) : string.Empty));
-                    if (field.HasConstant)
-                        writer.Line("constant:" + ConstantText(field.Constant == null ? null : field.Constant.Value));
-                    if (field.HasMarshalType)
-                        writer.Line("marshal:" + MarshalText(field.MarshalType));
-                    if (field.HasFieldRVA)
-                        writer.Line("rva:" + Convert.ToBase64String(field.InitialValue ?? new byte[0]));
-                    WriteCustomAttributes(writer, field.CustomAttributes, options);
+                    WriteField(writer, field, options);
                 }
                 foreach (PropertyDef property in type.Properties)
                 {
@@ -184,34 +174,70 @@ namespace HybridCLR.Editor.AssemblyShadow
             var methods = module.GetTypes().SelectMany(t => t.Methods).OrderBy(MethodKey, StringComparer.Ordinal);
             foreach (MethodDef method in methods)
             {
-                ShadowHash.Require(method.NativeBody == null, "UnsupportedNativeMethodBody", method.FullName);
-                writer.Line("method:" + MethodKey(method));
-                writer.Line(method.Attributes.ToString());
-                writer.Line(method.ImplAttributes.ToString());
-                if (method.MethodSig != null)
-                    writer.Line("sig:" + MethodSigText(method.MethodSig));
-                foreach (ParamDef parameter in method.ParamDefs)
-                {
-                    writer.Line("param:" + Invariant(parameter.Sequence) + ":" + parameter.Attributes + ":" + Utf8Text(parameter.Name));
-                    if (parameter.HasMarshalType)
-                        writer.Line("marshal:" + MarshalText(parameter.MarshalType));
-                    if (parameter.HasConstant)
-                        writer.Line("constant:" + ConstantText(parameter.Constant == null ? null : parameter.Constant.Value));
-                    WriteCustomAttributes(writer, parameter.CustomAttributes, options);
-                }
-                foreach (GenericParam parameter in method.GenericParameters.OrderBy(p => p.Number))
-                {
-                    WriteGenericParameter(writer, parameter, options);
-                }
-                if (method.ImplMap != null)
-                    writer.Line("pinvoke:" + PInvokeText(method.ImplMap));
-                WriteCustomAttributes(writer, method.CustomAttributes, options);
-                foreach (MethodOverride @override in method.Overrides)
-                    writer.Line("override:" + MethodRefText(@override.MethodBody) + ":" + MethodRefText(@override.MethodDeclaration));
-                if (method.HasBody)
-                    WriteBody(writer, method.Body);
+                WriteMethod(writer, method, options);
             }
             return writer.ToString();
+        }
+
+        // Resource callback analysis uses the identical typed signatures and exact IEEE
+        // operand encoding; do not maintain a second, weaker display-name-based encoder.
+        internal static string MethodSemanticText(MethodDef method)
+        {
+            var writer = new CanonicalSignatureWriter();
+            WriteMethod(writer, method, new SemanticHashOptions());
+            foreach (DeclSecurity security in method.DeclSecurities)
+                writer.Line("security:" + SecurityText(security));
+            return writer.ToString();
+        }
+
+        internal static string FieldSemanticText(FieldDef field)
+        {
+            var writer = new CanonicalSignatureWriter();
+            WriteField(writer, field, new SemanticHashOptions());
+            return writer.ToString();
+        }
+
+        private static void WriteField(CanonicalSignatureWriter writer, FieldDef field, SemanticHashOptions options)
+        {
+            writer.Line("field:" + FieldKey(field));
+            writer.Line(field.Attributes.ToString());
+            writer.Line(field.FieldType == null ? string.Empty : SigText(field.FieldType));
+            writer.Line("offset:" + (field.FieldOffset.HasValue ? Invariant(field.FieldOffset.Value) : string.Empty));
+            if (field.HasConstant)
+                writer.Line("constant:" + ConstantText(field.Constant == null ? null : field.Constant.Value));
+            if (field.HasMarshalType)
+                writer.Line("marshal:" + MarshalText(field.MarshalType));
+            if (field.HasFieldRVA)
+                writer.Line("rva:" + Convert.ToBase64String(field.InitialValue ?? new byte[0]));
+            WriteCustomAttributes(writer, field.CustomAttributes, options);
+        }
+
+        private static void WriteMethod(CanonicalSignatureWriter writer, MethodDef method, SemanticHashOptions options)
+        {
+            ShadowHash.Require(method.NativeBody == null, "UnsupportedNativeMethodBody", method.FullName);
+            writer.Line("method:" + MethodKey(method));
+            writer.Line(method.Attributes.ToString());
+            writer.Line(method.ImplAttributes.ToString());
+            if (method.MethodSig != null)
+                writer.Line("sig:" + MethodSigText(method.MethodSig));
+            foreach (ParamDef parameter in method.ParamDefs)
+            {
+                writer.Line("param:" + Invariant(parameter.Sequence) + ":" + parameter.Attributes + ":" + Utf8Text(parameter.Name));
+                if (parameter.HasMarshalType)
+                    writer.Line("marshal:" + MarshalText(parameter.MarshalType));
+                if (parameter.HasConstant)
+                    writer.Line("constant:" + ConstantText(parameter.Constant == null ? null : parameter.Constant.Value));
+                WriteCustomAttributes(writer, parameter.CustomAttributes, options);
+            }
+            foreach (GenericParam parameter in method.GenericParameters.OrderBy(p => p.Number))
+                WriteGenericParameter(writer, parameter, options);
+            if (method.ImplMap != null)
+                writer.Line("pinvoke:" + PInvokeText(method.ImplMap));
+            WriteCustomAttributes(writer, method.CustomAttributes, options);
+            foreach (MethodOverride @override in method.Overrides)
+                writer.Line("override:" + MethodRefText(@override.MethodBody) + ":" + MethodRefText(@override.MethodDeclaration));
+            if (method.HasBody)
+                WriteBody(writer, method.Body);
         }
 
         private static string WriteAttributes(ModuleDef module, SemanticHashOptions options)
@@ -491,14 +517,14 @@ namespace HybridCLR.Editor.AssemblyShadow
                 ":varargs:" + string.Join(",", (signature.ParamsAfterSentinel ?? new List<TypeSig>()).Select(SigText).ToArray());
         }
 
-        private static string MethodRefText(IMethod method)
+        internal static string MethodRefText(IMethod method)
         {
             if (method == null)
                 return string.Empty;
             return TypeRefText(method.DeclaringType) + ":" + Utf8Text(method.Name) + ":" + MethodSigText(method.MethodSig);
         }
 
-        private static string FieldRefText(IField field)
+        internal static string FieldRefText(IField field)
         {
             return field == null ? string.Empty : TypeRefText(field.DeclaringType) + ":" + Utf8Text(field.Name) + ":" + SigText(field.FieldSig == null ? null : field.FieldSig.Type);
         }
