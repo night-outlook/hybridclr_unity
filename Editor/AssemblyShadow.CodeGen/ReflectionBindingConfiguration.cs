@@ -121,9 +121,12 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         {
             string[] values = (defines ?? new string[0]).ToArray(); rawFileHash = null;
             if (values.Contains("UNITY_EDITOR", StringComparer.Ordinal)) return false;
-            var matches = values.Where(value => value != null && value.StartsWith(Prefix, StringComparison.Ordinal)).ToArray();
+            // Unity may forward the same control through multiple define sources.
+            // Only conflicting distinct controls are ambiguous; repetitions carry
+            // the same raw-file identity and must be idempotent.
+            var matches = values.Where(value => value != null && value.StartsWith(Prefix, StringComparison.Ordinal)).Distinct(StringComparer.Ordinal).ToArray();
             if (matches.Length == 0) return false;
-            BindingChecks.Require(matches.Length == 1, "AmbiguousBindingDefine", "Exactly one binding-control define is allowed.");
+            BindingChecks.Require(matches.Length == 1, "AmbiguousBindingDefine", "Exactly one distinct binding-control define is allowed.");
             rawFileHash = matches[0].Substring(Prefix.Length);
             BindingChecks.Require(BindingChecks.IsHash(rawFileHash), "InvalidBindingDefine", "Binding define must contain the lowercase raw-file SHA256.");
             return true;

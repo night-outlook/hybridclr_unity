@@ -217,8 +217,23 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             Assert.IsNull(ReflectionBindingsILPostProcessor.ProcessAssembly("ignored", new string[0], null, null, "/nonexistent"));
             string hash;
             Assert.AreEqual("InvalidBindingDefine", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingDefines.TryGetEnabledHash(new[] { ReflectionBindingDefines.Prefix + "invalid" }, out hash)).Code);
+            Assert.IsFalse(ReflectionBindingDefines.TryGetEnabledHash(new[] { "UNITY_EDITOR", ReflectionBindingDefines.Prefix + "invalid", ReflectionBindingDefines.Prefix + "invalid" }, out hash));
+            Assert.IsNull(hash);
+        }
+
+        [Test] public void IdenticalBindingControlsAreIdempotentButConflictsAndMalformedControlsFailClosed()
+        {
             string define = ReflectionBindingDefines.Create(new byte[] { 1 });
-            Assert.AreEqual("AmbiguousBindingDefine", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingDefines.TryGetEnabledHash(new[] { define, define }, out hash)).Code);
+            string other = ReflectionBindingDefines.Create(new byte[] { 2 });
+            string hash;
+            Assert.IsTrue(ReflectionBindingDefines.TryGetEnabledHash(new[] { "UNITY_STANDALONE_OSX", define, define, define }, out hash));
+            Assert.AreEqual(define.Substring(ReflectionBindingDefines.Prefix.Length), hash);
+            Assert.AreEqual("AmbiguousBindingDefine", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingDefines.TryGetEnabledHash(new[] { define, define, other }, out hash)).Code);
+            string malformed = ReflectionBindingDefines.Prefix + "invalid";
+            Assert.AreEqual("InvalidBindingDefine", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingDefines.TryGetEnabledHash(new[] { malformed, malformed }, out hash)).Code);
+            Assert.AreEqual("AmbiguousBindingDefine", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingDefines.TryGetEnabledHash(new[] { define, malformed, malformed }, out hash)).Code);
+            string uppercase = ReflectionBindingDefines.Prefix + define.Substring(ReflectionBindingDefines.Prefix.Length).ToUpperInvariant();
+            Assert.AreEqual("InvalidBindingDefine", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingDefines.TryGetEnabledHash(new[] { uppercase, uppercase }, out hash)).Code);
         }
 
         [Test] public void RawConfigurationDefineBindsExactBytesAndProjectRoot()
@@ -234,7 +249,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 string define = ReflectionBindingDefines.Create(raw);
                 Assert.AreEqual(fixture.Config.ComputeHash(), ReflectionBindingConfiguration.Parse(raw).ComputeHash());
                 Assert.IsNull(ReflectionBindingsILPostProcessor.ProcessAssembly("Other", new[] { define }, null, null, root));
-                Assert.NotNull(ReflectionBindingsILPostProcessor.ProcessAssembly("ReflectionFixture", new[] { define }, fixture.Pe, fixture.Pdb, root));
+                Assert.NotNull(ReflectionBindingsILPostProcessor.ProcessAssembly("ReflectionFixture", new[] { define, define }, fixture.Pe, fixture.Pdb, root));
                 File.AppendAllText(Path.Combine(root, ReflectionBindingConfiguration.ProjectRelativePath), " ");
                 Assert.AreEqual("BindingConfigurationHashMismatch", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingsILPostProcessor.ProcessAssembly("Other", new[] { define }, null, null, root)).Code);
                 Assert.AreEqual("InvalidProjectRoot", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingsILPostProcessor.ProcessAssembly("Other", new[] { define }, null, null, Path.GetDirectoryName(root))).Code);
