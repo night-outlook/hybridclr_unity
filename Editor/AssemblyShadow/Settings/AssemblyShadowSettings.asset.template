@@ -1,0 +1,30 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_Name: AssemblyShadowSettings
+  enableAssemblyShadow: 0
+  shadowAssemblyDefinitions: []
+  shadowAssemblyNames: []
+  bootstrapAssemblyDefinitions: []
+  bootstrapAssemblyNames: []
+  patchOutputRoot: HybridCLRData/AssemblyShadow/Patches
+  baselineOutputRoot: HybridCLRData/AssemblyShadow/Baselines
+  baselineManifestPath: 
+  buildId: 
+  currentCompileOutput: 
+  playerInputSnapshot: 
+  resourceBuildMapPath: ProjectSettings/AssemblyShadowResources.json
+  patchId: P01
+  targetReferenceDirectories: []
+  precompiledAssemblyNames: []
+  precompiledAssemblyCapabilities: []
+  architecture: 
+  sourcePinFile: ProjectSettings/AssemblyShadowSourcePins.json
+  explicitDependencyConfigPath: ProjectSettings/AssemblyShadowDependencies.json
+  extensibilityWhitelistPath: ProjectSettings/AssemblyShadowExtensibilityWhitelist.json
+  allowedInternalEditorAssemblies: []
+  enforceResourceAbi: 1
+  rejectUnknownReflectionDependencies: 1
+  includePdbInDevelopmentPatch: 1

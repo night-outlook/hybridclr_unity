@@ -1,0 +1,9 @@
+{
+  "name": "HybridCLR.AssemblyShadow.Editor.Tests",
+  "references": ["HybridCLR.Editor", "HybridCLR.Runtime"],
+  "includePlatforms": ["Editor"],
+  "overrideReferences": true,
+  "precompiledReferences": ["dnlib.dll", "nunit.framework.dll"],
+  "optionalUnityReferences": ["TestAssemblies"],
+  "autoReferenced": false
+}
