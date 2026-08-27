@@ -23,27 +23,32 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             public string root, buildId, architecture, target;
             public ShadowSourcePins pins;
-            public string[] protectedAssemblies, normalHotUpdateAssemblies;
+            public string[] protectedAssemblies, normalHotUpdateAssemblies, extraScriptingDefines;
             public AssemblyCapability[] capabilities;
             public SnapshotFile[] beforeFilters;
             public int beforeFilterOptions;
             public bool beforeFiltersCaptured, afterFiltersCaptured;
             public bool linkedDirectoryPrepared;
             public string preprocessBuildGuid, linkedSourceDirectory, linkedCopyDirectory;
+            public bool postprocessObserved;
+            public string postprocessBuildGuid;
         }
         public int callbackOrder { get { return int.MaxValue; } }
 
-        public static void Begin(string root, string buildId, BuildTarget target, string architecture, ShadowSourcePins pins, string[] candidates)
+        public static void Begin(string root, string buildId, BuildTarget target, string architecture, ShadowSourcePins pins, string[] candidates,
+            string[] extraScriptingDefines = null)
         {
             ShadowHash.Require(!string.IsNullOrWhiteSpace(buildId) && !Directory.Exists(root), "InvalidCapture", "A new snapshot root and build ID are required.");
             ShadowHash.Require(string.IsNullOrEmpty(SessionState.GetString(SessionKey, "")), "CaptureInProgress", "Finish or abort the preceding explicit Player capture.");
             ShadowPolicyConfiguration policy = AssemblyShadowSettingsUtil.CreatePolicyConfiguration(target);
+            ShadowReflectionBindingEvidence.RequireProjectDefines(extraScriptingDefines);
             SessionState.SetString(SessionKey, JsonUtility.ToJson(new Request
             {
                 root = Path.GetFullPath(root), buildId = buildId, target = target.ToString(), architecture = architecture, pins = pins,
                 protectedAssemblies = (candidates ?? new string[0]).Concat(policy.assemblies.Where(item => item.isShadowCapable || item.isBootstrap).Select(item => item.name))
                     .Select(AssemblyIdentityUtil.CanonicalName).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name, StringComparer.Ordinal).ToArray(),
                 normalHotUpdateAssemblies = NormalHotUpdateNames(), capabilities = policy.assemblies,
+                extraScriptingDefines = extraScriptingDefines ?? new string[0],
             }));
         }
 
@@ -107,7 +112,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 ShadowHash.Require(File.Exists(file.sourcePath) && ShadowHash.File(file.sourcePath) == file.sha256,
                     "FilteredInputChanged", file.sourcePath);
             var receipt = AssemblySnapshot.Capture(request.root, assemblies, AssemblySnapshot.TargetCompilerReferences(), "PlayerBuildInputs", target,
-                request.architecture, request.pins, new string[0], removed.Select(file => file.sourcePath));
+                request.architecture, request.pins, request.extraScriptingDefines, removed.Select(file => file.sourcePath));
             receipt.buildId = request.buildId;
             foreach (string candidate in request.protectedAssemblies)
                 ShadowHash.Require(receipt.assemblies.Any(f => string.Equals(AssemblyIdentityUtil.CanonicalName(f.name), AssemblyIdentityUtil.CanonicalName(candidate), StringComparison.OrdinalIgnoreCase)), "CandidateFilteredOut", "Shadow candidate/bootstrap did not enter AOT Player: " + candidate);
@@ -138,13 +143,31 @@ namespace HybridCLR.Editor.AssemblyShadow
             string json = SessionState.GetString(SessionKey, "");
             if (string.IsNullOrEmpty(json)) return;
             var request = JsonUtility.FromJson<Request>(json);
-            ShadowHash.Require(report.summary.result == BuildResult.Succeeded, "PlayerBuildFailed", "Unsuccessful Player cannot establish a baseline.");
-            ShadowHash.Require(request.linkedDirectoryPrepared && request.afterFiltersCaptured && report.summary.platform.ToString() == request.target &&
+            // Unity has not finalized summary.result while postprocessors run.
+            // Observe this phase without claiming a successful build; the caller
+            // must seal only after BuildPipeline.BuildPlayer has returned.
+            ShadowHash.Require(!request.postprocessObserved && request.linkedDirectoryPrepared && request.afterFiltersCaptured && report.summary.platform.ToString() == request.target &&
                 report.summary.guid.ToString() == request.preprocessBuildGuid && (int)report.summary.options == request.beforeFilterOptions,
                 "LinkedCaptureLifecycle", "Player postprocess does not match the fresh input/linker capture lifecycle.");
+            request.postprocessObserved = true;
+            request.postprocessBuildGuid = report.summary.guid.ToString();
+            SessionState.SetString(SessionKey, JsonUtility.ToJson(request));
+        }
+
+        public static void CompleteSuccessfulBuild(BuildReport report)
+        {
+            string json = SessionState.GetString(SessionKey, "");
+            ShadowHash.Require(!string.IsNullOrEmpty(json), "CaptureMissing", "Begin a Player capture before sealing its result.");
+            var request = JsonUtility.FromJson<Request>(json);
+            ShadowHash.Require(report != null && report.summary.result == BuildResult.Succeeded, "PlayerBuildFailed", "Only the finalized successful Player result can establish a baseline.");
+            ShadowHash.Require(request.postprocessObserved && request.linkedDirectoryPrepared && request.afterFiltersCaptured && report.summary.platform.ToString() == request.target &&
+                report.summary.guid.ToString() == request.preprocessBuildGuid && report.summary.guid.ToString() == request.postprocessBuildGuid &&
+                (int)report.summary.options == request.beforeFilterOptions,
+                "LinkedCaptureLifecycle", "Final Player result does not match the observed input/linker callbacks.");
             string receiptPath = Path.Combine(request.root, AssemblySnapshot.ReceiptName);
             ShadowHash.Require(File.Exists(receiptPath), "CaptureMissing", "Player completed without the input capture callback.");
             var receipt = JsonUtility.FromJson<AssemblySnapshotReceipt>(File.ReadAllText(receiptPath));
+            ShadowHash.Require(!receipt.playerBuildSucceeded, "CaptureAlreadySealed", "A Player capture can be sealed only once.");
             receipt.playerBuildSucceeded = true;
             receipt.buildGuid = report.summary.guid.ToString();
             receipt.playerOutput = Path.GetFullPath(report.summary.outputPath);

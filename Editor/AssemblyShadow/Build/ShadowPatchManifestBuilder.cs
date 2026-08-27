@@ -34,8 +34,12 @@ namespace HybridCLR.Editor.AssemblyShadow
             var frozenReceipt = AssemblySnapshot.ReadAndVerify(Path.Combine(baselineRoot, baseline.playerInputSnapshot), true);
             ShadowHash.Require(frozenReceipt.snapshotHash == baseline.playerInputSnapshotHash, "BaselineInputMismatch", baselineRoot);
             var policy = ShadowFilteredInputPolicy.Apply(request.policy, frozenReceipt);
+            ShadowReflectionBindingEvidence.RequirePolicy(policy, request.currentCompileSnapshot, receipt, false);
+            ShadowHash.Require((policy.reflectionBindingConfigurationHash ?? "") == (baseline.reflectionBindingConfigurationHash ?? ""),
+                "ReflectionBindingPolicyChanged", "Changing a fixed AOT reflection contract requires a new Player baseline.");
             using (var set = ShadowBaselineManifestBuilder.LoadSnapshot(request.currentCompileSnapshot, policy))
             {
+                ShadowReflectionBindingEvidence.AddCompiledDependencies(policy, set.Assemblies.Values);
                 ShadowAssemblyPolicyValidator.ValidateCompiled(set, policy, DateTime.UtcNow).ThrowIfInvalid();
                 var current = set.Assemblies.Values.ToArray();
                 string bootstrapAbi = ShadowBaselineManifestBuilder.BootstrapHash(current);
@@ -76,6 +80,9 @@ namespace HybridCLR.Editor.AssemblyShadow
                     patchId = request.patchId, baselineBuildId = baseline.baselineBuildId, baselineManifestSha256 = ShadowHash.File(request.baselineManifestPath),
                     unityVersion = baseline.unityVersion, target = baseline.target, architecture = baseline.architecture, sourcePins = receipt.sourcePins,
                     runtimeAbiHash = baseline.runtimeAbiHash, compileSnapshotHash = receipt.snapshotHash, bootstrapAbiHash = bootstrapAbi,
+                    reflectionBindingConfigurationSha256 = policy.reflectionBindingConfigurationSha256,
+                    reflectionBindingConfigurationHash = policy.reflectionBindingConfigurationHash,
+                    reflectionBindings = policy.reflectionBindings,
                     baselineResourceAbiHash = baseline.resourceAbiHash, resourceAbiHash = ResourceAbiHasher.Compute(resourceAbi), resourceChangeLevel = diff.level.ToString(),
                     dllOnly = request.dllOnly, resourceBundlesRequired = affected, resourceChangeReasons = diff.reasons,
                     changedRoots = roots, loadOrder = order, closure = entries, dependencyGraph = graph.Edges, deferredFacadeReferences = set.DeferredFacadeReferences.ToArray(),
@@ -84,6 +91,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 ShadowArtifactWriter.Json(temporary, "resource-abi.json", resourceAbi);
                 ShadowArtifactWriter.Json(temporary, "resource-abi-diff.json", diff);
                 ShadowArtifactWriter.Json(temporary, "compile-snapshot-receipt.json", receipt);
+                ShadowReflectionBindingEvidence.Copy(request.currentCompileSnapshot, temporary, receipt);
                 ShadowArtifactWriter.Finish(temporary, request.outputDirectory, "patch-manifest.json");
                 return manifest;
             }

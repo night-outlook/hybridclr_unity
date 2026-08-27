@@ -203,8 +203,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 input.architecture == receipt.architecture, "ResourceCompilerMismatch", "Resource compiler receipt identity changed.");
             if (receipt.provenance == FreshBuildProvenance)
             {
-                ShadowHash.Require(!receipt.compilerSnapshotIsPlayer && input.extraScriptingDefines.Length == 0 && receipt.metadataAssemblyDirectory == "ResourceAssemblies",
-                    "ResourceCompilerMismatch", "New resources require one fresh empty-extra-define CompilePlayerScripts snapshot.");
+                ShadowHash.Require(!receipt.compilerSnapshotIsPlayer && ShadowReflectionBindingEvidence.UserDefines(input.extraScriptingDefines).Length == 0 && receipt.metadataAssemblyDirectory == "ResourceAssemblies",
+                    "ResourceCompilerMismatch", "New resources require one fresh CompilePlayerScripts snapshot without patch defines.");
                 RequireFreshMetadataInputs(receipt, input);
             }
             else VerifyM01Proof(root, receipt);
@@ -419,6 +419,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             }
             ShadowArtifactWriter.Json(destination, AssemblySnapshot.ReceiptName, receipt);
             if (receipt.linkedPlayerReceipt != null) ShadowLinkedPlayerEvidence.Copy(source, destination, receipt);
+            ShadowReflectionBindingEvidence.Copy(source, destination, receipt);
         }
 
         private static void VerifyMetadataFiles(string root, ShadowResourceBaselineReceipt receipt)

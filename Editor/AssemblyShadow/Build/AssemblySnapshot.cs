@@ -100,6 +100,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 expected.UnionWith(result.linkedPlayerReceipt.assemblies.Select(f => Path.GetFullPath(ShadowHash.SafeChild(root, ShadowLinkedPlayerEvidence.DirectoryName + "/" + f.path))));
             var actual = Directory.GetFiles(root, "*.dll", SearchOption.AllDirectories).Select(Path.GetFullPath);
             ShadowHash.Require(expected.SetEquals(actual), "SnapshotSetMismatch", "Snapshot contains undeclared or missing DLLs.");
+            ShadowReflectionBindingEvidence.ReadAndVerify(root, result, requirePlayer);
             return result;
         }
 
@@ -141,6 +142,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 kind = kind, target = target.ToString(), architecture = architecture, unityVersion = Application.unityVersion,
                 sourcePins = pins, extraScriptingDefines = ShadowHash.Sorted(defines ?? new string[0]), assemblies = assemblies, references = references, filteredAssemblies = filtered,
             };
+            ShadowReflectionBindingEvidence.Capture(root, receipt);
             receipt.snapshotHash = ComputeHash(receipt);
             WriteReceipt(root, receipt);
             return receipt;
@@ -219,10 +221,11 @@ namespace HybridCLR.Editor.AssemblyShadow
             string output = Path.Combine(root, "CompilerOutput");
             ShadowHash.Require(!Directory.Exists(root), "SnapshotExists", root);
             Directory.CreateDirectory(output);
+            string[] compilationDefines = ShadowReflectionBindingEvidence.CompilationDefines(defines);
             var settings = new ScriptCompilationSettings
             {
                 group = BuildPipeline.GetBuildTargetGroup(target), target = target,
-                options = ScriptCompilationOptions.DevelopmentBuild, extraScriptingDefines = defines ?? new string[0],
+                options = ScriptCompilationOptions.DevelopmentBuild, extraScriptingDefines = compilationDefines,
             };
             var compilation = PlayerBuildInterface.CompilePlayerScripts(settings, output);
             ShadowHash.Require(compilation.assemblies != null && compilation.assemblies.Count > 0, "CompileFailed", "No Player assemblies emitted.");
@@ -235,7 +238,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 (a.classification == AssemblyClassification.Runtime || a.classification == AssemblyClassification.NormalHotUpdate) &&
                 AssemblyIdentityUtil.CanonicalName(a.name) == AssemblyIdentityUtil.CanonicalName(p)));
             string snapshot = Path.Combine(root, "Snapshot");
-            Capture(snapshot, emitted.Concat(plugins), references, "CompilePlayerScripts", target, architecture, pins, defines);
+            var receipt = Capture(snapshot, emitted.Concat(plugins), references, "CompilePlayerScripts", target, architecture, pins, compilationDefines);
+            ShadowReflectionBindingEvidence.RequirePolicy(policy, snapshot, receipt, false);
             return snapshot;
         }
     }

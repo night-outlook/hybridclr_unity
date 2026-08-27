@@ -29,7 +29,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 enforceResourceAbi = settings.enforceResourceAbi,
                 allowedInternalEditorAssemblies = settings.allowedInternalEditorAssemblies ?? new string[0],
             };
-            return policy;
+            return ShadowReflectionBindingEvidence.DeclareProject(policy);
         }
 
         public static string[] ValidateSettings()

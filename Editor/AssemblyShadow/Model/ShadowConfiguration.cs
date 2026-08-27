@@ -88,6 +88,9 @@ namespace HybridCLR.Editor.AssemblyShadow
         public ExtensibilityWhitelist extensibilityWhitelist = new ExtensibilityWhitelist();
         public bool rejectUnknownReflectionDependencies = true;
         public bool enforceResourceAbi = true;
+        public string reflectionBindingConfigurationSha256;
+        public string reflectionBindingConfigurationHash;
+        public ShadowReflectionBindingDeclaration[] reflectionBindings = new ShadowReflectionBindingDeclaration[0];
         // Explicit Editor-only authoring/test tools; none may enter a Player.
         public string[] allowedInternalEditorAssemblies = new string[0];
     }

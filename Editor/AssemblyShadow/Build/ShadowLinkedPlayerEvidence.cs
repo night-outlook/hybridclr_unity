@@ -19,6 +19,7 @@ namespace HybridCLR.Editor.AssemblyShadow
     {
         public int schemaVersion = 1;
         public string buildGuid, nativeLibrarySha256, target, architecture, sourceDirectory;
+        public string reflectionBindingEvidenceHash;
         public string[] protectedAssemblies = new string[0];
         public LinkedPlayerFile[] assemblies = new LinkedPlayerFile[0];
     }
@@ -41,6 +42,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             return linked == null || ((linked.schemaVersion == 0 || linked.schemaVersion == 1) &&
                 string.IsNullOrEmpty(linked.buildGuid) && string.IsNullOrEmpty(linked.nativeLibrarySha256) &&
                 string.IsNullOrEmpty(linked.target) && string.IsNullOrEmpty(linked.architecture) && string.IsNullOrEmpty(linked.sourceDirectory) &&
+                string.IsNullOrEmpty(linked.reflectionBindingEvidenceHash) &&
                 (linked.protectedAssemblies == null || linked.protectedAssemblies.Length == 0) &&
                 (linked.assemblies == null || linked.assemblies.Length == 0));
         }
@@ -85,7 +87,6 @@ namespace HybridCLR.Editor.AssemblyShadow
                 "UnmatchedLinkedSymbols", "All linked PDBs must belong to a captured DLL.");
             linked.assemblies = files.OrderBy(f => f.name, StringComparer.Ordinal).ToArray();
             player.linkedPlayerReceipt = linked;
-            player.linkedPlayerReceiptHash = ComputeHash(linked);
             player.linkerExcludedAssemblies = (player.assemblies ?? new SnapshotFile[0]).Select(f => AssemblyIdentityUtil.CanonicalName(f.name))
                 .Where(n => !names.Contains(n)).OrderBy(n => n, StringComparer.Ordinal).ToArray();
             var roles = (capabilities ?? new AssemblyCapability[0]).ToArray();
@@ -97,6 +98,9 @@ namespace HybridCLR.Editor.AssemblyShadow
                 return new AssemblyCapability { name = role.name, classification = role.classification, isPrecompiled = role.isPrecompiled,
                     isShadowCapable = role.isShadowCapable, isBootstrap = role.isBootstrap, capabilityDeclared = role.capabilityDeclared };
             }).ToArray();
+            linked.reflectionBindingEvidenceHash = ShadowReflectionBindingLinkedEvidence.Capture(snapshotRoot, player);
+            if (!string.IsNullOrEmpty(linked.reflectionBindingEvidenceHash)) linked.schemaVersion = 2;
+            player.linkedPlayerReceiptHash = ComputeHash(linked);
             ValidateReceipt(player);
             File.WriteAllText(Path.Combine(destination, ReceiptName), JsonUtility.ToJson(linked, true), new UTF8Encoding(false));
             ReadAndVerify(snapshotRoot, player);
@@ -104,9 +108,10 @@ namespace HybridCLR.Editor.AssemblyShadow
 
         public static string ComputeHash(LinkedPlayerReceipt receipt)
         {
-            var text = new StringBuilder("assembly-shadow-linked-player:1\n");
+            var text = new StringBuilder("assembly-shadow-linked-player:" + receipt.schemaVersion + "\n");
             text.Append(receipt.schemaVersion).Append('\n').Append(receipt.buildGuid).Append('\n').Append(receipt.nativeLibrarySha256).Append('\n')
                 .Append(receipt.target).Append('\n').Append(receipt.architecture).Append('\n').Append(receipt.sourceDirectory).Append('\n');
+            if (receipt.schemaVersion == 2) text.Append("reflection-bindings:").Append(receipt.reflectionBindingEvidenceHash).Append('\n');
             foreach (string name in (receipt.protectedAssemblies ?? new string[0]).OrderBy(n => n, StringComparer.Ordinal)) text.Append("protected:").Append(name).Append('\n');
             foreach (var file in (receipt.assemblies ?? new LinkedPlayerFile[0]).OrderBy(f => f.path, StringComparer.Ordinal))
                 text.Append(file.name).Append('\n').Append(file.path).Append('\n').Append(file.sha256).Append('\n').Append(file.mvid).Append('\n')
@@ -117,11 +122,13 @@ namespace HybridCLR.Editor.AssemblyShadow
         public static void ValidateReceipt(AssemblySnapshotReceipt player)
         {
             LinkedPlayerReceipt linked = player == null ? null : player.linkedPlayerReceipt;
-            ShadowHash.Require(linked != null && linked.schemaVersion == 1 && player.kind == "PlayerBuildInputs" && player.playerBuildSucceeded &&
+            ShadowHash.Require(linked != null && (linked.schemaVersion == 1 || linked.schemaVersion == 2) && player.kind == "PlayerBuildInputs" && player.playerBuildSucceeded &&
                 player.playerBuildFilterCaptured && !string.IsNullOrWhiteSpace(linked.buildGuid) && IsHash(linked.nativeLibrarySha256) &&
                 !string.IsNullOrWhiteSpace(linked.target) && !string.IsNullOrWhiteSpace(linked.architecture) && !string.IsNullOrWhiteSpace(linked.sourceDirectory) &&
                 Path.IsPathRooted(linked.sourceDirectory) && linked.assemblies != null && linked.assemblies.Length > 0,
                 "LinkedEvidenceMissing", "A successful Player requires a complete linked-output receipt.");
+            ShadowHash.Require(linked.schemaVersion == 2 ? IsHash(linked.reflectionBindingEvidenceHash) : string.IsNullOrEmpty(linked.reflectionBindingEvidenceHash),
+                "LinkedReflectionEvidenceSchema", "Linked schema 2 requires a binding proof hash; schema 1 cannot claim one.");
             ShadowHash.Require(linked.buildGuid == player.buildGuid && linked.nativeLibrarySha256 == player.nativeLibrarySha256 && linked.target == player.target &&
                 linked.architecture == player.architecture, "LinkedBuildIdentityMismatch", "Linked evidence belongs to a different Player build.");
             var linkedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

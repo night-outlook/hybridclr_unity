@@ -15,6 +15,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             ShadowHash.Require(!string.IsNullOrWhiteSpace(request.resourceBaselinePath), "ResourceReceiptRequired", "Build and freeze baseline resources before associating them with a Player.");
             var receipt = AssemblySnapshot.ReadAndVerify(request.playerInputSnapshot, true);
             var policy = ShadowFilteredInputPolicy.Apply(request.policy, receipt);
+            ShadowReflectionBindingEvidence.RequirePolicy(policy, request.playerInputSnapshot, receipt, true);
             ShadowSourcePins.RequireSameBuildSources(receipt.sourcePins, request.sourcePins);
             ShadowHash.Require(receipt.buildId == request.buildId && receipt.target == request.target.ToString() && receipt.architecture == request.architecture && receipt.unityVersion == Application.unityVersion,
                 "BaselineIdentityMismatch", "Build ID/Unity/target/architecture must match the successful Player input snapshot.");
@@ -23,6 +24,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             var frozenResources = ShadowResourceBaseline.ReadAndVerify(request.resourceBaselinePath, request.target, request.architecture);
             using (var set = LoadSnapshot(request.playerInputSnapshot, policy))
             {
+                ShadowReflectionBindingEvidence.AddCompiledDependencies(policy, set.Assemblies.Values);
                 ShadowAssemblyPolicyValidator.ValidateCompiled(set, policy, DateTime.UtcNow).ThrowIfInvalid();
                 var graph = new AssemblyReferenceGraph(set.Assemblies.Values, policy.dependencies);
                 string[] candidates = set.Assemblies.Values.Where(a => a.isShadowCapable).Select(a => a.name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
@@ -50,6 +52,9 @@ namespace HybridCLR.Editor.AssemblyShadow
                     sourcePins = receipt.sourcePins, runtimeAbiHash = receipt.sourcePins.RuntimeAbiHash(), shadowCandidates = candidates, bootstrapAssemblies = bootstrap,
                     bootstrapAbiHash = BootstrapHash(descriptors), resourceAbiHash = ResourceAbiHasher.Compute(resourceAbi),
                     resourceIndexHash = ShadowHash.Text(JsonUtility.ToJson(index, true)), policyHash = ShadowHash.Text(JsonUtility.ToJson(policy, true)),
+                    reflectionBindingConfigurationSha256 = policy.reflectionBindingConfigurationSha256,
+                    reflectionBindingConfigurationHash = policy.reflectionBindingConfigurationHash,
+                    reflectionBindings = policy.reflectionBindings,
                     resourceBuildReceiptHash = ShadowHash.File(Path.Combine(frozenResources.Root, ShadowResourceBaseline.ReceiptName)),
                     playerInputSnapshotHash = receipt.snapshotHash, playerBuildGuid = receipt.buildGuid, nativeLibrarySha256 = receipt.nativeLibrarySha256,
                     assemblies = descriptors, dependencyGraph = graph.Edges, deferredFacadeReferences = set.DeferredFacadeReferences.ToArray(), bundles = bundles,
@@ -100,6 +105,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             }
             ShadowArtifactWriter.Json(destination, "PlayerInputs/" + AssemblySnapshot.ReceiptName, receipt);
             ShadowLinkedPlayerEvidence.Copy(source, Path.Combine(destination, "PlayerInputs"), receipt);
+            ShadowReflectionBindingEvidence.Copy(source, Path.Combine(destination, "PlayerInputs"), receipt);
         }
 
         private static void CopyResourceEvidence(string source, string destination)

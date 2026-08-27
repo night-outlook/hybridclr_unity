@@ -45,6 +45,9 @@ namespace HybridCLR.Editor.AssemblyShadow
         public string resourceBaselinePath = "ResourceInputs";
         public string resourceBuildReceiptHash;
         public string policyHash;
+        public string reflectionBindingConfigurationSha256;
+        public string reflectionBindingConfigurationHash;
+        public ShadowReflectionBindingDeclaration[] reflectionBindings = new ShadowReflectionBindingDeclaration[0];
         public string playerInputSnapshot = "PlayerInputs";
         public string playerInputSnapshotHash;
         public string playerBuildGuid;
@@ -83,6 +86,9 @@ namespace HybridCLR.Editor.AssemblyShadow
         public ShadowSourcePins sourcePins;
         public string runtimeAbiHash;
         public string compileSnapshotHash;
+        public string reflectionBindingConfigurationSha256;
+        public string reflectionBindingConfigurationHash;
+        public ShadowReflectionBindingDeclaration[] reflectionBindings = new ShadowReflectionBindingDeclaration[0];
         public string bootstrapAbiHash;
         public string baselineResourceAbiHash;
         public string resourceAbiHash;

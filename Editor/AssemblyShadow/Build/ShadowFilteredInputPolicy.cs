@@ -102,6 +102,12 @@ namespace HybridCLR.Editor.AssemblyShadow
                     isPrecompiled = item.isPrecompiled, capabilityDeclared = item.capabilityDeclared }).ToArray(),
                 rejectUnknownReflectionDependencies = source.rejectUnknownReflectionDependencies,
                 enforceResourceAbi = source.enforceResourceAbi,
+                reflectionBindingConfigurationSha256 = source.reflectionBindingConfigurationSha256,
+                reflectionBindingConfigurationHash = source.reflectionBindingConfigurationHash,
+                reflectionBindings = (source.reflectionBindings ?? new ShadowReflectionBindingDeclaration[0]).Select(item => item == null ? null :
+                    new ShadowReflectionBindingDeclaration { id = item.id, consumer = item.consumer, typeName = item.typeName,
+                        methodSignature = item.methodSignature, originalMethodHash = item.originalMethodHash, operationIndex = item.operationIndex,
+                        allowedTypes = (item.allowedTypes ?? new string[0]).ToArray(), providers = (item.providers ?? new string[0]).ToArray(), reason = item.reason }).ToArray(),
                 allowedInternalEditorAssemblies = (source.allowedInternalEditorAssemblies ?? new string[0]).ToArray(),
                 dependencies = source.dependencies == null ? null : new ShadowDependencyConfiguration
                 {

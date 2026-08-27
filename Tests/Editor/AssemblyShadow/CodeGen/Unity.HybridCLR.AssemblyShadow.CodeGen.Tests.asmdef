@@ -1,0 +1,10 @@
+{
+  "name": "Unity.HybridCLR.AssemblyShadow.CodeGen.Tests",
+  "references": ["Unity.HybridCLR.AssemblyShadow.CodeGen", "UnityEngine.TestRunner", "UnityEditor.TestRunner"],
+  "includePlatforms": ["Editor"],
+  "overrideReferences": true,
+  "precompiledReferences": ["dnlib.dll", "nunit.framework.dll"],
+  "autoReferenced": false,
+  "defineConstraints": ["UNITY_INCLUDE_TESTS"],
+  "noEngineReferences": false
+}
