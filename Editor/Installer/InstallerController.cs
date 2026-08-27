@@ -52,13 +52,13 @@ namespace HybridCLR.Editor.Installer
 
         private HybridclrVersionManifest GetHybridCLRVersionManifest()
         {
-            string versionFile = $"{SettingsUtil.ProjectDir}/{SettingsUtil.HybridCLRDataPathInPackage}/hybridclr_version.json";
+            string versionFile = Path.Combine(SettingsUtil.HybridCLRDataFilePath, "hybridclr_version.json");
             return JsonUtility.FromJson<HybridclrVersionManifest>(File.ReadAllText(versionFile, Encoding.UTF8));
         }
 
         private PackageInfo LoadPackageInfo()
         {
-            string packageJson = $"{SettingsUtil.ProjectDir}/Packages/{SettingsUtil.PackageName}/package.json";
+            string packageJson = Path.Combine(SettingsUtil.PackageRootPath, "package.json");
             return JsonUtility.FromJson<PackageInfo>(File.ReadAllText(packageJson, Encoding.UTF8));
         }
 
@@ -246,9 +246,9 @@ namespace HybridCLR.Editor.Installer
         private string GetUnityIl2CppDllModifiedPath(string curVersionStr)
         {
 #if UNITY_EDITOR_WIN
-            return $"{SettingsUtil.ProjectDir}/{SettingsUtil.HybridCLRDataPathInPackage}/ModifiedUnityAssemblies/{curVersionStr}/Unity.IL2CPP-Win.dll";
+                return Path.Combine(SettingsUtil.HybridCLRDataFilePath, "ModifiedUnityAssemblies", curVersionStr, "Unity.IL2CPP-Win.dll");
 #else
-            return $"{SettingsUtil.ProjectDir}/{SettingsUtil.HybridCLRDataPathInPackage}/ModifiedUnityAssemblies/{curVersionStr}/Unity.IL2CPP-Mac.dll";
+                return Path.Combine(SettingsUtil.HybridCLRDataFilePath, "ModifiedUnityAssemblies", curVersionStr, "Unity.IL2CPP-Mac.dll");
 #endif
         }
 

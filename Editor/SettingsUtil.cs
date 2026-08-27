@@ -6,6 +6,7 @@ using UnityEditor;
 using UnityEditorInternal;
 using UnityEngine;
 using HybridCLR.Editor.Settings;
+using PackageInfo = UnityEditor.PackageManager.PackageInfo;
 
 
 namespace HybridCLR.Editor
@@ -26,7 +27,27 @@ namespace HybridCLR.Editor
 
         public static string HybridCLRDataPathInPackage => $"Packages/{PackageName}/Data~";
 
-        public static string TemplatePathInPackage => $"{HybridCLRDataPathInPackage}/Templates";
+        /// <summary>
+        /// Filesystem path to the package root. PackageInfo is required for a local UPM
+        /// dependency because its resolved path is not necessarily ProjectDir/Packages.
+        /// </summary>
+        public static string PackageRootPath
+        {
+            get
+            {
+                PackageInfo packageInfo = PackageInfo.FindForAssetPath($"Packages/{PackageName}/package.json");
+                if (packageInfo != null && !string.IsNullOrEmpty(packageInfo.resolvedPath))
+                {
+                    return Path.GetFullPath(packageInfo.resolvedPath);
+                }
+
+                return Path.GetFullPath(Path.Combine(ProjectDir, "Packages", PackageName));
+            }
+        }
+
+        public static string HybridCLRDataFilePath => Path.Combine(PackageRootPath, "Data~");
+
+        public static string TemplatePathInPackage => Path.Combine(HybridCLRDataFilePath, "Templates");
 
         public static string ProjectDir { get; } = Directory.GetParent(Application.dataPath).ToString();
 
