@@ -92,10 +92,16 @@ namespace HybridCLR.Editor.AssemblyShadow
                 string consumer = AssemblyIdentityUtil.CanonicalName(entry.consumer);
                 string provider = AssemblyIdentityUtil.CanonicalName(entry.provider);
                 RequireKnown(consumer); RequireKnown(provider);
-                ShadowHash.Require(assemblies[consumer].isBootstrap && assemblies[provider].isShadowCapable &&
-                    !string.IsNullOrWhiteSpace(entry.typeName) && !string.IsNullOrWhiteSpace(entry.method) && !string.IsNullOrWhiteSpace(entry.reason),
-                    "InvalidEntrypoint", "Entrypoints require a fixed bootstrap, candidate, type, method and reason.");
-                ShadowHash.Require(entries.Add(consumer + "\n" + provider + "\n" + entry.typeName + "\n" + entry.method + "\n" + entry.callSite + "\n" + entry.target), "DuplicateEntrypoint", entry.consumer + " -> " + entry.typeName);
+                var target = assemblies[provider];
+                bool approvedProvider = !target.isBootstrap &&
+                    ((target.classification == AssemblyClassification.Runtime && target.isShadowCapable) ||
+                     (target.classification == AssemblyClassification.NormalHotUpdate && !target.isShadowCapable));
+                string callSite = BootstrapIsolationRule.CallSite(entry);
+                ShadowHash.Require(assemblies[consumer].isBootstrap && approvedProvider &&
+                    !string.IsNullOrWhiteSpace(entry.typeName) && !string.IsNullOrWhiteSpace(callSite) &&
+                    callSite.IndexOf("::", StringComparison.Ordinal) > 0 && !string.IsNullOrWhiteSpace(entry.reason),
+                    "InvalidEntrypoint", "Entrypoints require a fixed bootstrap, shadow-capable or ordinary hot-update provider, type, callsite and reason.");
+                ShadowHash.Require(entries.Add(consumer + "\n" + provider + "\n" + entry.typeName + "\n" + callSite + "\n" + entry.target), "DuplicateEntrypoint", entry.consumer + " -> " + entry.typeName);
             }
         }
 

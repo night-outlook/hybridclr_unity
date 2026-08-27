@@ -176,12 +176,12 @@ namespace HybridCLR.Editor.AssemblyShadow
         }
 
         public static ShadowPolicyValidationResult ValidateCompiled(CompiledAssemblySet set, ShadowPolicyConfiguration policy,
-            string root, AssemblySnapshotReceipt receipt, bool requireLinked)
+            string root, AssemblySnapshotReceipt receipt, bool requireLinked, VerifiedLinkedRuntimeReferences linkedRuntimeReferences = null)
         {
             RequirePolicy(policy, root, receipt, requireLinked);
             var configuration = ReadAndVerify(root, receipt, requireLinked);
             return ShadowAssemblyPolicyValidator.ValidateCompiled(set, policy, DateTime.UtcNow,
-                configuration, ReadFixedImages(root, configuration));
+                configuration, ReadFixedImages(root, configuration), linkedRuntimeReferences);
         }
 
         public static void Copy(string source, string destination, AssemblySnapshotReceipt receipt)

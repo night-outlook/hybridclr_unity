@@ -40,7 +40,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             using (var set = ShadowBaselineManifestBuilder.LoadSnapshot(request.currentCompileSnapshot, policy, receipt))
             {
                 ShadowReflectionBindingEvidence.AddCompiledDependencies(policy, set.Assemblies.Values);
-                ShadowReflectionBindingEvidence.ValidateCompiled(set, policy, request.currentCompileSnapshot, receipt, false).ThrowIfInvalid();
+                var linkedReferences = VerifiedLinkedRuntimeReferences.Verify(Path.Combine(baselineRoot, baseline.playerInputSnapshot), frozenReceipt, set, policy);
+                ShadowReflectionBindingEvidence.ValidateCompiled(set, policy, request.currentCompileSnapshot, receipt, false, linkedReferences).ThrowIfInvalid();
                 var current = set.Assemblies.Values.ToArray();
                 string bootstrapAbi = ShadowBaselineManifestBuilder.BootstrapHash(current);
                 ShadowHash.Require(bootstrapAbi == baseline.bootstrapAbiHash, "BootstrapAbiChanged", "Fixed Bootstrap metadata/IL changed.");

@@ -67,7 +67,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     if (instruction.OpCode.OperandType == OperandType.ShortInlineBrTarget && code.EndsWith("_S", StringComparison.Ordinal)) code = code.Substring(0, code.Length - 2);
                     hash.Add(code);
                     object operand = index == replacementIndex ? replacement : instruction.Operand;
-                    Operand(hash, operand, indices);
+                    Operand(hash, operand, indices, instruction.OpCode.OperandType);
                 }
                 hash.Add(body.ExceptionHandlers.Count);
                 foreach (var handler in body.ExceptionHandlers)
@@ -85,22 +85,44 @@ namespace HybridCLR.AssemblyShadow.CodeGen
             using (var hash = new BindingHash("method-reference:1")) { Method(hash, method); return hash.Finish(); }
         }
 
-        private static void Operand(BindingHash hash, object operand, IDictionary<Instruction, int> indices)
+        private static void Operand(BindingHash hash, object operand, IDictionary<Instruction, int> indices, OperandType operandType)
         {
+            // dnlib MemberRef implements both IMethod and IField. Its signature,
+            // not interface-test order, identifies the actual metadata member.
+            // Also retain rejection of field tokens used as calls (and vice versa).
+            var methodOperand = operand as IMethod;
+            var fieldOperand = operand as IField;
+            if (operandType == OperandType.InlineMethod)
+                BindingChecks.Require(methodOperand != null && methodOperand.MethodSig != null, "UnsupportedOperand", "Method signature missing.");
+            if (operandType == OperandType.InlineField)
+                BindingChecks.Require(fieldOperand != null && fieldOperand.FieldSig != null && fieldOperand.FieldSig.Type != null, "UnsupportedOperand", "Field signature missing.");
             if (operand == null) { hash.Add("none"); return; }
             var instruction = operand as Instruction;
             if (instruction != null) { hash.Add("branch"); Position(hash, instruction, indices); return; }
             var targets = operand as IList<Instruction>;
             if (targets != null) { hash.Add("switch"); hash.Add(targets.Count); foreach (var target in targets) Position(hash, target, indices); return; }
-            var method = operand as IMethod;
+            var member = operand as MemberRef;
+            if (member != null)
+            {
+                BindingChecks.Require((member.MethodSig != null) != (member.FieldSig != null), "UnsupportedOperand", "MemberRef requires exactly one field or method signature.");
+                if (member.FieldSig != null) { Field(hash, member); return; }
+            }
+            var method = methodOperand;
             if (method != null) { hash.Add("method"); Method(hash, method); return; }
-            var field = operand as IField;
-            if (field != null) { hash.Add("field"); TypeReference(hash, field.DeclaringType); hash.Add(field.Name.String); TypeSignature(hash, field.FieldSig.Type); return; }
+            var field = fieldOperand;
+            if (field != null) { Field(hash, field); return; }
             var type = operand as ITypeDefOrRef;
             if (type != null) { hash.Add("type"); TypeReference(hash, type); return; }
             var signature = operand as CallingConventionSig;
             if (signature != null) { hash.Add("signature"); Signature(hash, signature); return; }
             Primitive(hash, operand);
+        }
+
+        private static void Field(BindingHash hash, IField field)
+        {
+            BindingChecks.Require(field != null && field.FieldSig != null && field.FieldSig.Type != null, "UnsupportedOperand", "Field signature missing.");
+            // Preserve the original FieldDef fingerprint encoding exactly.
+            hash.Add("field"); TypeReference(hash, field.DeclaringType); hash.Add(field.Name.String); TypeSignature(hash, field.FieldSig.Type);
         }
 
         private static void Position(BindingHash hash, Instruction instruction, IDictionary<Instruction, int> indices)

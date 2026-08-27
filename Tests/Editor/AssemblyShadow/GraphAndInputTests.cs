@@ -88,6 +88,96 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             Assert.AreEqual("NonShadowConsumer", Assert.Throws<ShadowBuildException>(() => new AssemblyReferenceGraph(Demo().Concat(new[] { hot })).ReverseClosure(new[] { "Contracts" })).Code);
         }
 
+        [Test] public void OrdinaryHotUpdateEntrypointRetainsItsExplicitRuntimeEdge()
+        {
+            var modules = EntrypointModules();
+            var config = EntrypointConfiguration();
+            var graph = new AssemblyReferenceGraph(modules, config);
+            Assert.AreEqual(1, graph.Edges.Length);
+            Assert.AreEqual("Bootstrap", graph.Edges[0].consumer);
+            Assert.AreEqual("OrdinaryHotUpdate", graph.Edges[0].provider);
+            Assert.AreEqual("ReflectionString", graph.Edges[0].kind);
+            var definitions = EntrypointDefinitions(modules);
+            var policy = new ShadowPolicyConfiguration { dependencies = config };
+            Assert.IsTrue(ShadowAssemblyPolicyValidator.ValidateDefinitions(definitions, policy, DateTime.UtcNow).IsValid);
+
+            // An exact entry approval is not authority to perform an unguarded image load.
+            definitions[0].managedAcquisitions = new[] { new ManagedAcquisitionEvidence
+            { kind = "AssemblyLoadBytes", callSite = "Bootstrap::Probe", requiresContract = true, verified = false } };
+            StringAssert.Contains("UnboundedManagedAcquisition",
+                ShadowAssemblyPolicyValidator.ValidateDefinitions(definitions, policy, DateTime.UtcNow).ToString());
+        }
+
+        [TestCase("Bootstrap::Other", "OrdinaryHotUpdate.Entry, OrdinaryHotUpdate")]
+        [TestCase("Bootstrap::Probe", "OrdinaryHotUpdate.Other, OrdinaryHotUpdate")]
+        public void OrdinaryHotUpdateEntrypointStillRequiresExactCallsiteAndTarget(string callSite, string target)
+        {
+            var definitions = EntrypointDefinitions(EntrypointModules());
+            definitions[0].reflectionDependencies[0].callSite = callSite;
+            definitions[0].reflectionDependencies[0].target = target;
+            StringAssert.Contains("BootstrapReflection", ShadowAssemblyPolicyValidator.ValidateDefinitions(definitions,
+                new ShadowPolicyConfiguration { dependencies = EntrypointConfiguration() }, DateTime.UtcNow).ToString());
+        }
+
+        [TestCase(AssemblyClassification.Runtime, false, false)]
+        [TestCase(AssemblyClassification.EditorOnly, false, false)]
+        [TestCase(AssemblyClassification.TestOnly, false, false)]
+        [TestCase(AssemblyClassification.Reference, false, false)]
+        [TestCase(AssemblyClassification.BuildFiltered, false, false)]
+        [TestCase(AssemblyClassification.NormalHotUpdate, true, false)]
+        [TestCase(AssemblyClassification.NormalHotUpdate, false, true)]
+        [TestCase(AssemblyClassification.Runtime, true, true)]
+        public void EntrypointCannotPromoteAnIneligibleProvider(AssemblyClassification classification, bool candidate, bool bootstrap)
+        {
+            var modules = EntrypointModules();
+            modules[1].classification = classification;
+            modules[1].isShadowCapable = candidate;
+            modules[1].isBootstrap = bootstrap;
+            var config = EntrypointConfiguration();
+            config.runtimeDependencies = new DeclaredRuntimeDependency[0];
+            Assert.AreEqual("InvalidEntrypoint", Assert.Throws<ShadowBuildException>(() => new AssemblyReferenceGraph(modules, config)).Code);
+            StringAssert.Contains("InvalidEntrypoint", ShadowAssemblyPolicyValidator.ValidateDefinitions(EntrypointDefinitions(modules),
+                new ShadowPolicyConfiguration { dependencies = config }, DateTime.UtcNow).ToString());
+        }
+
+        [Test] public void EntrypointCallsiteAliasHasTheSameGraphIdentity()
+        {
+            var config = EntrypointConfiguration();
+            var entry = config.bootstrapEntrypoints[0];
+            entry.callSite = entry.method; entry.method = null;
+            Assert.DoesNotThrow(() => new AssemblyReferenceGraph(EntrypointModules(), config));
+            config.bootstrapEntrypoints = new[] { entry, new BootstrapEntrypointDeclaration
+            { consumer = entry.consumer, provider = entry.provider, typeName = entry.typeName, method = entry.callSite, reason = entry.reason } };
+            Assert.AreEqual("DuplicateEntrypoint", Assert.Throws<ShadowBuildException>(() => new AssemblyReferenceGraph(EntrypointModules(), config)).Code);
+        }
+
+        private static AssemblyDescriptor[] EntrypointModules()
+        {
+            var bootstrap = A("Bootstrap"); bootstrap.isShadowCapable = false; bootstrap.isBootstrap = true;
+            var hot = A("OrdinaryHotUpdate"); hot.classification = AssemblyClassification.NormalHotUpdate; hot.isShadowCapable = false;
+            return new[] { bootstrap, hot };
+        }
+
+        private static ShadowDependencyConfiguration EntrypointConfiguration()
+        {
+            return new ShadowDependencyConfiguration
+            {
+                runtimeDependencies = new[] { new DeclaredRuntimeDependency
+                { consumer = "Bootstrap", provider = "OrdinaryHotUpdate", kind = "ReflectionString", callSite = "Bootstrap::Probe", evidence = "Verified fixed-image entry probe" } },
+                bootstrapEntrypoints = new[] { new BootstrapEntrypointDeclaration
+                { consumer = "Bootstrap", provider = "OrdinaryHotUpdate", typeName = "OrdinaryHotUpdate.Entry", method = "Bootstrap::Probe", reason = "Exact ordinary-hot-update probe" } },
+            };
+        }
+
+        private static AssemblyPolicyDefinition[] EntrypointDefinitions(AssemblyDescriptor[] modules)
+        {
+            var definitions = modules.Select(module => new AssemblyPolicyDefinition
+            { name = module.name, classification = module.classification, isShadowCapable = module.isShadowCapable, isBootstrap = module.isBootstrap }).ToArray();
+            definitions[0].reflectionDependencies = new[] { new ReflectionDependencyEvidence
+            { callSite = "Bootstrap::Probe", target = "OrdinaryHotUpdate.Entry, OrdinaryHotUpdate", provider = "OrdinaryHotUpdate", typeName = "OrdinaryHotUpdate.Entry" } };
+            return definitions;
+        }
+
         [TestCase("Missing", "Provider", "UnknownAssembly")]
         [TestCase("Provider", "Provider", "SelfDependency")]
         [TestCase("Consumer", "Provider", "DuplicateDependency")]

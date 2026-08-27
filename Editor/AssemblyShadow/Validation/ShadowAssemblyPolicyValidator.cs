@@ -83,7 +83,7 @@ namespace HybridCLR.Editor.AssemblyShadow
     {
         public static ShadowPolicyValidationResult ValidateCompiled(CompiledAssemblySet set,
             ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration = null,
-            IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null)
+            IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null, VerifiedLinkedRuntimeReferences linkedRuntimeReferences = null)
         {
             if (set == null)
             {
@@ -117,7 +117,13 @@ namespace HybridCLR.Editor.AssemblyShadow
                     isBootstrap = capability != null && capability.isBootstrap,
                 });
             }
-            var result = ValidateDefinitions(definitions, policy, utcNow);
+            HashSet<string> removedReferences = null;
+            if (linkedRuntimeReferences != null)
+            {
+                try { removedReferences = linkedRuntimeReferences.ValidateFor(set, policy); }
+                catch (Exception error) { bindingErrors.Error("InvalidLinkedRuntimeReferenceProof", error.Message); }
+            }
+            var result = ValidateDefinitionsInternal(definitions, policy, utcNow, removedReferences);
             foreach (var error in bindingErrors.Diagnostics) result.Error(error.code, error.message);
             return result;
         }
@@ -194,6 +200,12 @@ namespace HybridCLR.Editor.AssemblyShadow
         public static ShadowPolicyValidationResult ValidateDefinitions(IEnumerable<AssemblyPolicyDefinition> definitions,
             ShadowPolicyConfiguration policy, DateTime utcNow)
         {
+            return ValidateDefinitionsInternal(definitions, policy, utcNow, null);
+        }
+
+        private static ShadowPolicyValidationResult ValidateDefinitionsInternal(IEnumerable<AssemblyPolicyDefinition> definitions,
+            ShadowPolicyConfiguration policy, DateTime utcNow, HashSet<string> verifiedRemovedReferences)
+        {
             var result = new ShadowPolicyValidationResult();
             policy = policy ?? new ShadowPolicyConfiguration();
             var items = (definitions ?? Enumerable.Empty<AssemblyPolicyDefinition>()).Where(item => item != null).ToArray();
@@ -224,9 +236,12 @@ namespace HybridCLR.Editor.AssemblyShadow
                             result.Error("UnresolvedRuntimeReference", consumer.name + " references unresolved runtime assembly " + providerName + ".");
                         continue;
                     }
-                    if (consumer.entersPlayer && IsRuntime(consumer) && !provider.entersPlayer && provider.classification != AssemblyClassification.Reference)
-                        result.Error("InvalidRuntimeReference", consumer.name + " references a non-Player assembly " + providerName + ".");
-                    CheckFilteredReference(consumer, provider, result);
+                    if (verifiedRemovedReferences == null || !verifiedRemovedReferences.Contains(VerifiedLinkedRuntimeReferences.EdgeKey(consumer.name, providerName)))
+                    {
+                        if (consumer.entersPlayer && IsRuntime(consumer) && !provider.entersPlayer && provider.classification != AssemblyClassification.Reference)
+                            result.Error("InvalidRuntimeReference", consumer.name + " references a non-Player assembly " + providerName + ".");
+                        CheckFilteredReference(consumer, provider, result);
+                    }
                     if (IsRuntime(provider))
                     {
                         InternalDependencyRule.Check(consumer, provider, policy, result);
@@ -357,8 +372,10 @@ namespace HybridCLR.Editor.AssemblyShadow
                 AssemblyPolicyDefinition providerDefinition;
                 if (!byName.TryGetValue(consumer, out consumerDefinition) || !consumerDefinition.isBootstrap)
                     result.Error("InvalidEntrypoint", "Entrypoint consumer is not a configured bootstrap assembly: " + entry.consumer);
-                if (!byName.TryGetValue(provider, out providerDefinition) || !providerDefinition.isShadowCapable)
-                    result.Error("InvalidEntrypoint", "Entrypoint provider is not a shadow-capable assembly: " + entry.provider);
+                if (!byName.TryGetValue(provider, out providerDefinition) ||
+                    !(providerDefinition.classification == AssemblyClassification.Runtime && providerDefinition.isShadowCapable && !providerDefinition.isBootstrap ||
+                      providerDefinition.classification == AssemblyClassification.NormalHotUpdate && !providerDefinition.isShadowCapable && !providerDefinition.isBootstrap))
+                    result.Error("InvalidEntrypoint", "Entrypoint provider is not a shadow-capable or ordinary hot-update assembly: " + entry.provider);
                 if (BootstrapIsolationRule.CallSite(entry).IndexOf("::", StringComparison.Ordinal) <= 0)
                     result.Error("InvalidEntrypoint", "Entrypoint callsite must be Type::Method: " + BootstrapIsolationRule.CallSite(entry));
             }

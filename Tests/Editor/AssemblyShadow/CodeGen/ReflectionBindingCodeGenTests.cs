@@ -211,6 +211,56 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             Assert.AreEqual("DuplicateMethodSite", Assert.Throws<ReflectionBindingException>(() => fixture.Config.Validate()).Code);
         }
 
+        [Test] public void FieldMemberRefUsesTheExistingFieldFingerprintAndBindsNameOwnerAndType()
+        {
+            var fixture = Fixture.Create();
+            using (var module = ModuleDefMD.Load(fixture.Pe))
+            {
+                var method = module.GetTypes().SelectMany(type => type.Methods).Single();
+                var field = new FieldDefUser("State", new FieldSig(module.CorLibTypes.String), dnlib.DotNet.FieldAttributes.Public | dnlib.DotNet.FieldAttributes.Static);
+                method.DeclaringType.Fields.Add(field);
+                var operation = Instruction.Create(OpCodes.Ldsfld, field);
+                method.Body.Instructions.Insert(0, operation); method.Body.Instructions.Insert(1, Instruction.Create(OpCodes.Pop));
+                string original = ReflectionBindingFingerprint.Compute(method);
+                var reference = new MemberRefUser(module, field.Name, field.FieldSig, field.DeclaringType);
+                Assert.IsInstanceOf<IMethod>(reference); Assert.IsInstanceOf<IField>(reference);
+                Assert.IsNull(reference.MethodSig); Assert.IsNotNull(reference.FieldSig);
+                operation.Operand = reference;
+                Assert.AreEqual(original, ReflectionBindingFingerprint.Compute(method), "A field MemberRef must use the existing FieldDef encoding.");
+                reference.Name = "Different"; Assert.AreNotEqual(original, ReflectionBindingFingerprint.Compute(method)); reference.Name = field.Name;
+                reference.FieldSig = new FieldSig(module.CorLibTypes.Int32); Assert.AreNotEqual(original, ReflectionBindingFingerprint.Compute(method)); reference.FieldSig = field.FieldSig;
+                reference.Class = new TypeRefUser(module, "Other", "Owner", module.CorLibTypes.AssemblyRef);
+                Assert.AreNotEqual(original, ReflectionBindingFingerprint.Compute(method)); reference.Class = field.DeclaringType;
+                reference.Class = new TypeRefUser(module, field.DeclaringType.Namespace, field.DeclaringType.Name, new AssemblyRefUser("DifferentProvider"));
+                Assert.AreNotEqual(original, ReflectionBindingFingerprint.Compute(method)); reference.Class = field.DeclaringType;
+                using (var stream = new MemoryStream())
+                {
+                    module.Write(stream);
+                    using (var emitted = ModuleDefMD.Load(stream.ToArray()))
+                        Assert.AreEqual(original, ReflectionBindingFingerprint.Compute(emitted.GetTypes().SelectMany(type => type.Methods).Single()));
+                }
+            }
+        }
+
+        [Test] public void FingerprintRejectsMissingSignaturesAndFieldMethodOpcodeMismatches()
+        {
+            var fixture = Fixture.Create();
+            using (var module = ModuleDefMD.Load(fixture.Pe))
+            {
+                var method = module.GetTypes().SelectMany(type => type.Methods).Single(); var call = method.Body.Instructions[1];
+                var lookup = call.Operand;
+                var field = new MemberRefUser(module, "State", new FieldSig(module.CorLibTypes.String), method.DeclaringType);
+                call.Operand = field;
+                Assert.AreEqual("UnsupportedOperand", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingFingerprint.Compute(method)).Code);
+                call.OpCode = OpCodes.Ldsfld; call.Operand = lookup;
+                Assert.AreEqual("UnsupportedOperand", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingFingerprint.Compute(method)).Code);
+                call.OpCode = OpCodes.Ldtoken; call.Operand = new MemberRefUser(module, "Missing", (FieldSig)null, method.DeclaringType);
+                Assert.AreEqual("UnsupportedOperand", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingFingerprint.Compute(method)).Code);
+                call.Operand = new MemberRefUser(module, "MissingType", new FieldSig(null), method.DeclaringType);
+                Assert.AreEqual("UnsupportedOperand", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingFingerprint.Compute(method)).Code);
+            }
+        }
+
         [Test] public void EditorAndDisabledFeaturesSkipWithoutReadingMachineState()
         {
             Assert.IsNull(ReflectionBindingsILPostProcessor.ProcessAssembly("ignored", new[] { "UNITY_EDITOR", ReflectionBindingDefines.Prefix + "invalid" }, null, null, "/nonexistent"));

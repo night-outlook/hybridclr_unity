@@ -25,7 +25,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             using (var set = LoadSnapshot(request.playerInputSnapshot, policy, receipt))
             {
                 ShadowReflectionBindingEvidence.AddCompiledDependencies(policy, set.Assemblies.Values);
-                ShadowReflectionBindingEvidence.ValidateCompiled(set, policy, request.playerInputSnapshot, receipt, true).ThrowIfInvalid();
+                var linkedReferences = VerifiedLinkedRuntimeReferences.Verify(request.playerInputSnapshot, receipt, set, policy);
+                ShadowReflectionBindingEvidence.ValidateCompiled(set, policy, request.playerInputSnapshot, receipt, true, linkedReferences).ThrowIfInvalid();
                 var graph = new AssemblyReferenceGraph(set.Assemblies.Values, policy.dependencies);
                 string[] candidates = set.Assemblies.Values.Where(a => a.isShadowCapable).Select(a => a.name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
                 string[] bootstrap = set.Assemblies.Values.Where(a => a.isBootstrap).Select(a => a.name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
