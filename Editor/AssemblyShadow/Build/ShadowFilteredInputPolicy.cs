@@ -160,10 +160,12 @@ namespace HybridCLR.Editor.AssemblyShadow
                 enforceResourceAbi = source.enforceResourceAbi,
                 reflectionBindingConfigurationSha256 = source.reflectionBindingConfigurationSha256,
                 reflectionBindingConfigurationHash = source.reflectionBindingConfigurationHash,
-                reflectionBindings = (source.reflectionBindings ?? new ShadowReflectionBindingDeclaration[0]).Select(item => item == null ? null :
+                reflectionBindings = source.reflectionBindings == null ? null : source.reflectionBindings.Select(item => item == null ? null :
                     new ShadowReflectionBindingDeclaration { id = item.id, consumer = item.consumer, typeName = item.typeName,
                         methodSignature = item.methodSignature, originalMethodHash = item.originalMethodHash, operationIndex = item.operationIndex,
-                        allowedTypes = (item.allowedTypes ?? new string[0]).ToArray(), providers = (item.providers ?? new string[0]).ToArray(), reason = item.reason }).ToArray(),
+                        allowedTypes = item.allowedTypes == null ? null : item.allowedTypes.ToArray(),
+                        providers = item.providers == null ? null : item.providers.ToArray(), reason = item.reason, kind = item.kind,
+                        imageSha256 = item.imageSha256, providerAssemblyIdentity = item.providerAssemblyIdentity, imagePath = item.imagePath }).ToArray(),
                 allowedInternalEditorAssemblies = (source.allowedInternalEditorAssemblies ?? new string[0]).ToArray(),
                 dependencies = source.dependencies == null ? null : new ShadowDependencyConfiguration
                 {

@@ -503,6 +503,64 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         }
 
         [Test]
+        public void FilterPolicyClonePreservesReflectionBindingSchemaFieldsAndNulls()
+        {
+            var populated = new ShadowReflectionBindingDeclaration
+            {
+                id = "binding-1", consumer = "Consumer", typeName = "Example.Type", methodSignature = "Run()",
+                originalMethodHash = ShadowHash.Text("method"), operationIndex = 7, allowedTypes = new[] { "Example.Allowed" },
+                providers = new[] { "Provider" }, reason = "fixture", kind = "FixedAssemblyBytes", imageSha256 = ShadowHash.Text("image"),
+                providerAssemblyIdentity = "Provider, Version=1.0.0.0", imagePath = "Assets/Provider.dll",
+            };
+            var schema1 = new ShadowReflectionBindingDeclaration
+            {
+                id = "binding-legacy", consumer = "LegacyConsumer", typeName = "Legacy.Type", methodSignature = "Run()",
+                originalMethodHash = ShadowHash.Text("legacy-method"), operationIndex = 0, allowedTypes = null, providers = new string[0],
+                reason = "legacy", kind = null, imageSha256 = null, providerAssemblyIdentity = null, imagePath = null,
+            };
+            var policy = FilterSourcePolicy();
+            policy.reflectionBindings = new[] { populated, schema1 };
+            var receipt = FilterReceipt(policy);
+
+            var derived = ShadowFilteredInputPolicy.Apply(policy, receipt);
+            var derivedPatch = ShadowFilteredInputPolicy.ApplyPatch(policy, receipt, new[] { "Business" }, new string[0]);
+            foreach (ShadowPolicyConfiguration clone in new[] { derived, derivedPatch })
+            {
+                Assert.That(clone.reflectionBindings, Is.Not.SameAs(policy.reflectionBindings));
+                Assert.That(clone.reflectionBindings[0], Is.Not.SameAs(populated));
+                Assert.That(clone.reflectionBindings[0].id, Is.EqualTo(populated.id));
+                Assert.That(clone.reflectionBindings[0].consumer, Is.EqualTo(populated.consumer));
+                Assert.That(clone.reflectionBindings[0].typeName, Is.EqualTo(populated.typeName));
+                Assert.That(clone.reflectionBindings[0].methodSignature, Is.EqualTo(populated.methodSignature));
+                Assert.That(clone.reflectionBindings[0].originalMethodHash, Is.EqualTo(populated.originalMethodHash));
+                Assert.That(clone.reflectionBindings[0].operationIndex, Is.EqualTo(populated.operationIndex));
+                Assert.That(clone.reflectionBindings[0].allowedTypes, Is.Not.SameAs(populated.allowedTypes));
+                Assert.That(clone.reflectionBindings[0].allowedTypes, Is.EqualTo(populated.allowedTypes));
+                Assert.That(clone.reflectionBindings[0].providers, Is.Not.SameAs(populated.providers));
+                Assert.That(clone.reflectionBindings[0].providers, Is.EqualTo(populated.providers));
+                Assert.That(clone.reflectionBindings[0].reason, Is.EqualTo(populated.reason));
+                Assert.That(clone.reflectionBindings[0].kind, Is.EqualTo(populated.kind));
+                Assert.That(clone.reflectionBindings[0].imageSha256, Is.EqualTo(populated.imageSha256));
+                Assert.That(clone.reflectionBindings[0].providerAssemblyIdentity, Is.EqualTo(populated.providerAssemblyIdentity));
+                Assert.That(clone.reflectionBindings[0].imagePath, Is.EqualTo(populated.imagePath));
+                Assert.That(clone.reflectionBindings[1].allowedTypes, Is.Null);
+                Assert.That(clone.reflectionBindings[1].providers, Is.Not.Null);
+                Assert.That(clone.reflectionBindings[1].providers, Is.Empty);
+                Assert.That(clone.reflectionBindings[1].kind, Is.Null);
+                Assert.That(clone.reflectionBindings[1].imageSha256, Is.Null);
+                Assert.That(clone.reflectionBindings[1].providerAssemblyIdentity, Is.Null);
+                Assert.That(clone.reflectionBindings[1].imagePath, Is.Null);
+            }
+
+            derived.reflectionBindings[0].allowedTypes[0] = "changed";
+            derived.reflectionBindings[0].providers[0] = "changed";
+            Assert.That(populated.allowedTypes[0], Is.EqualTo("Example.Allowed"));
+            Assert.That(populated.providers[0], Is.EqualTo("Provider"));
+            Assert.That(derivedPatch.reflectionBindings[0].allowedTypes[0], Is.EqualTo("Example.Allowed"));
+            Assert.That(derivedPatch.reflectionBindings[0].providers[0], Is.EqualTo("Provider"));
+        }
+
+        [Test]
         public void FilterPolicyRejectsUnsealedMissingAndModifiedEvidence()
         {
             var policy = FilterSourcePolicy();
