@@ -32,6 +32,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             public string preprocessBuildGuid, linkedSourceDirectory, linkedCopyDirectory;
             public bool postprocessObserved;
             public string postprocessBuildGuid;
+            public int preprocessReportInstanceId;
+            public string preprocessOutputPath;
         }
         public int callbackOrder { get { return int.MaxValue; } }
 
@@ -78,10 +80,16 @@ namespace HybridCLR.Editor.AssemblyShadow
             ShadowHash.Require(!string.IsNullOrWhiteSpace(source), "LinkedSourceLocatorMissing", request.target);
             request.linkedSourceDirectory = Path.GetFullPath(source);
             request.preprocessBuildGuid = report.summary.guid.ToString();
+            request.preprocessReportInstanceId = report.GetInstanceID();
+            request.preprocessOutputPath = CanonicalOutputPath(report.summary.outputPath);
+            Guid preprocessGuid;
+            ShadowHash.Require(request.preprocessReportInstanceId != 0 && Guid.TryParseExact(request.preprocessBuildGuid, "N", out preprocessGuid),
+                "LinkedCaptureLifecycle", "Preprocess requires a live native BuildReport identity and a well-formed (possibly unassigned) GUID.");
             request.linkedDirectoryPrepared = true;
             SessionState.SetString(SessionKey, JsonUtility.ToJson(request));
             Debug.Log("[AssemblyShadow] Player preprocess observed: buildId=" + request.buildId + "; guid=" + request.preprocessBuildGuid +
-                "; platform=" + request.target + "; options=" + OptionsText((int)report.summary.options) + "; root=" + request.root);
+                "; platform=" + request.target + "; options=" + OptionsText((int)report.summary.options) +
+                "; reportInstanceId=" + request.preprocessReportInstanceId + "; output=" + request.preprocessOutputPath + "; root=" + request.root);
         }
 
         internal static string[] BeforeFilters(BuildOptions buildOptions, string[] assemblies)
@@ -155,7 +163,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             // must seal only after BuildPipeline.BuildPlayer has returned.
             RequireBuildLifecycle(false, request.linkedDirectoryPrepared, request.afterFiltersCaptured, request.postprocessObserved,
                 request.target, report.summary.platform.ToString(), request.preprocessBuildGuid, request.postprocessBuildGuid,
-                report.summary.guid.ToString(), request.beforeFilterOptions, (int)report.summary.options);
+                report.summary.guid.ToString(), request.beforeFilterOptions, (int)report.summary.options,
+                request.preprocessReportInstanceId, report.GetInstanceID(), request.preprocessOutputPath, CanonicalOutputPath(report.summary.outputPath));
             request.postprocessObserved = true;
             request.postprocessBuildGuid = report.summary.guid.ToString();
             SessionState.SetString(SessionKey, JsonUtility.ToJson(request));
@@ -169,14 +178,15 @@ namespace HybridCLR.Editor.AssemblyShadow
             ShadowHash.Require(report != null && report.summary.result == BuildResult.Succeeded, "PlayerBuildFailed", "Only the finalized successful Player result can establish a baseline.");
             RequireBuildLifecycle(true, request.linkedDirectoryPrepared, request.afterFiltersCaptured, request.postprocessObserved,
                 request.target, report.summary.platform.ToString(), request.preprocessBuildGuid, request.postprocessBuildGuid,
-                report.summary.guid.ToString(), request.beforeFilterOptions, (int)report.summary.options);
+                report.summary.guid.ToString(), request.beforeFilterOptions, (int)report.summary.options,
+                request.preprocessReportInstanceId, report.GetInstanceID(), request.preprocessOutputPath, CanonicalOutputPath(report.summary.outputPath));
             string receiptPath = Path.Combine(request.root, AssemblySnapshot.ReceiptName);
             ShadowHash.Require(File.Exists(receiptPath), "CaptureMissing", "Player completed without the input capture callback.");
             var receipt = JsonUtility.FromJson<AssemblySnapshotReceipt>(File.ReadAllText(receiptPath));
             ShadowHash.Require(!receipt.playerBuildSucceeded, "CaptureAlreadySealed", "A Player capture can be sealed only once.");
             receipt.playerBuildSucceeded = true;
             receipt.buildGuid = report.summary.guid.ToString();
-            receipt.playerOutput = Path.GetFullPath(report.summary.outputPath);
+            receipt.playerOutput = request.preprocessOutputPath;
             string directory = Directory.Exists(receipt.playerOutput) ? receipt.playerOutput : Path.GetDirectoryName(receipt.playerOutput);
             string nativeName = report.summary.platform == BuildTarget.StandaloneOSX ? "GameAssembly.dylib" : "GameAssembly.dll";
             var nativeFiles = Directory.GetFiles(directory, nativeName, SearchOption.AllDirectories);
@@ -191,21 +201,28 @@ namespace HybridCLR.Editor.AssemblyShadow
             Debug.Log("[AssemblyShadow] Sealed Player input snapshot " + receipt.snapshotHash + " for native " + receipt.nativeLibrarySha256);
         }
 
-        // Keep callback invariants unchanged, but name every failed predicate.
-        // BuildSummary GUID/options are native phase-dependent values; do not
-        // guess which changed or normalize them without observed build evidence.
+        // Unity 2022.3 leaves the preprocess GUID all-zero and assigns it before
+        // postprocess. Bind that interval to the live native report and output;
+        // once assigned, the GUID must remain stable through finalized success.
         internal static void RequireBuildLifecycle(bool completing, bool linkedDirectoryPrepared, bool afterFiltersCaptured, bool postprocessObserved,
             string expectedTarget, string observedTarget, string preprocessGuid, string postprocessGuid, string observedGuid,
-            int expectedOptions, int observedOptions)
+            int expectedOptions, int observedOptions, int expectedReportInstanceId, int observedReportInstanceId,
+            string expectedOutputPath, string observedOutputPath)
         {
             var failures = new List<string>();
             if (postprocessObserved != completing) failures.Add("postprocessObserved");
             if (!linkedDirectoryPrepared) failures.Add("linkedDirectoryPrepared");
             if (!afterFiltersCaptured) failures.Add("afterFiltersCaptured");
             if (observedTarget != expectedTarget) failures.Add("platform");
-            if (observedGuid != preprocessGuid) failures.Add("preprocessBuildGuid");
+            Guid parsedPreprocess, parsedObserved;
+            bool validPreprocess = Guid.TryParseExact(preprocessGuid, "N", out parsedPreprocess);
+            bool validObserved = Guid.TryParseExact(observedGuid, "N", out parsedObserved) && parsedObserved != Guid.Empty;
+            if (!validPreprocess || (parsedPreprocess != Guid.Empty && observedGuid != preprocessGuid)) failures.Add("preprocessBuildGuid");
+            if (!validObserved) failures.Add("assignedBuildGuid");
             if (completing && observedGuid != postprocessGuid) failures.Add("postprocessBuildGuid");
             if (observedOptions != expectedOptions) failures.Add("buildOptions");
+            if (expectedReportInstanceId == 0 || observedReportInstanceId != expectedReportInstanceId) failures.Add("reportInstanceId");
+            if (string.IsNullOrWhiteSpace(expectedOutputPath) || !Path.IsPathRooted(expectedOutputPath) || observedOutputPath != expectedOutputPath) failures.Add("outputPath");
             ShadowHash.Require(failures.Count == 0, "LinkedCaptureLifecycle",
                 "phase=" + (completing ? "CompleteSuccessfulBuild" : "OnPostprocessBuild") + "; failed=[" + string.Join(",", failures.ToArray()) + "]" +
                 "; linkedDirectoryPrepared=" + linkedDirectoryPrepared + "; afterFiltersCaptured=" + afterFiltersCaptured +
@@ -213,7 +230,19 @@ namespace HybridCLR.Editor.AssemblyShadow
                 "; expectedPlatform=" + expectedTarget + "; observedPlatform=" + observedTarget +
                 "; preprocessGuid=" + (preprocessGuid ?? "<null>") + "; postprocessGuid=" + (postprocessGuid ?? "<null>") +
                 "; observedGuid=" + (observedGuid ?? "<null>") + "; expectedFilterOptions=" + OptionsText(expectedOptions) +
-                "; observedReportOptions=" + OptionsText(observedOptions));
+                "; observedReportOptions=" + OptionsText(observedOptions) +
+                "; expectedReportInstanceId=" + expectedReportInstanceId + "; observedReportInstanceId=" + observedReportInstanceId +
+                "; expectedOutputPath=" + (expectedOutputPath ?? "<null>") + "; observedOutputPath=" + (observedOutputPath ?? "<null>"));
+        }
+
+        internal static string CanonicalOutputPath(string path)
+        {
+            ShadowHash.Require(!string.IsNullOrWhiteSpace(path), "LinkedCaptureLifecycle", "A nonempty Player output path is required in every build phase.");
+            string full = Path.GetFullPath(path);
+            int rootLength = Path.GetPathRoot(full).Length;
+            while (full.Length > rootLength && (full[full.Length - 1] == Path.DirectorySeparatorChar || full[full.Length - 1] == Path.AltDirectorySeparatorChar))
+                full = full.Substring(0, full.Length - 1);
+            return full;
         }
 
         private static string OptionsText(int options)
