@@ -42,19 +42,47 @@ namespace HybridCLR.Editor.Installer
                 p.StartInfo.CreateNoWindow = true;
                 p.StartInfo.RedirectStandardOutput = true;
                 p.StartInfo.RedirectStandardError = true;
-                string argsStr = string.Join(" ", args);
+                string argsStr = string.Join(" ", args.Select(QuoteArgument));
                 p.StartInfo.Arguments = argsStr;
                 if (log)
                 {
                     UnityEngine.Debug.Log($"[BashUtil] run => {program} {argsStr}");
                 }
                 p.Start();
-                p.WaitForExit();
-
-                string stdOut = p.StandardOutput.ReadToEnd();
-                string stdErr = p.StandardError.ReadToEnd();
+                // Drain both pipes while the child runs. Waiting first deadlocks once
+                // git ls-tree (or another command) fills an OS pipe buffer.
+                Task<string> stdoutTask = p.StandardOutput.ReadToEndAsync();
+                Task<string> stderrTask = p.StandardError.ReadToEndAsync();
+                if (!p.WaitForExit(60000))
+                {
+                    if (!p.HasExited) p.Kill();
+                    throw new TimeoutException($"Command '{program}' exceeded 60 seconds.");
+                }
+                string stdOut = stdoutTask.GetAwaiter().GetResult();
+                string stdErr = stderrTask.GetAwaiter().GetResult();
                 return (p.ExitCode, stdOut, stdErr);
             }
+        }
+
+        private static string QuoteArgument(string value)
+        {
+            // ProcessStartInfo.Arguments uses command-line quoting, not a shell.
+            // Preserve spaces, quotes and trailing backslashes on Windows and Mono.
+            var result = new StringBuilder("\"");
+            int slashes = 0;
+            foreach (char character in value)
+            {
+                if (character == '\\')
+                {
+                    ++slashes;
+                    continue;
+                }
+                result.Append('\\', character == '"' ? slashes * 2 + 1 : slashes);
+                result.Append(character);
+                slashes = 0;
+            }
+            result.Append('\\', slashes * 2);
+            return result.Append('"').ToString();
         }
 
 
