@@ -168,6 +168,13 @@ namespace HybridCLR.Editor.AssemblyShadow
                             argument = Value.String(freshName);
                         if (argument == null || argument.kind != "string" || string.IsNullOrWhiteSpace(argument.text))
                         { unknown.Add(callSite); acquisitions.Add(Acquisition(method, called, callSite, index, kind, true, null)); continue; }
+                        // Resolver-delegate overloads can resolve the same literal
+                        // against arbitrary assemblies. A string is never proof
+                        // for those overloads, including on the legacy simple path.
+                        if ((kind == "Type.GetType" || kind == "Assembly.GetType") &&
+                            (argumentIndex != 0 || called.MethodSig.Params.Count > 3 ||
+                             called.MethodSig.Params.Skip(1).Any(parameter => parameter.ElementType != ElementType.Boolean)))
+                        { unknown.Add(callSite); acquisitions.Add(Acquisition(method, called, callSite, index, kind, true, null)); continue; }
                         string provider = null, typeName = null;
                         if (kind == "Assembly.Load")
                             provider = freshNames.ContainsKey(instruction) ? NameLoadProvider(argument.text) :
@@ -177,6 +184,20 @@ namespace HybridCLR.Editor.AssemblyShadow
                             Value receiver = Receiver(input, called);
                             string requiredAssembly = kind == "Assembly.GetType" && receiver != null && receiver.kind == "assembly" ? receiver.assembly : null;
                             if (kind == "Assembly.GetType" && requiredAssembly == null) { unknown.Add(callSite); acquisitions.Add(Acquisition(method, called, callSite, index, kind, true, null)); continue; }
+                            if ((kind == "Type.GetType" || kind == "Assembly.GetType") && argument.text.IndexOf('[') >= 0)
+                            {
+                                ReflectionTypeLiteralResolver.Component[] components;
+                                if (!IsTrustedConstructedTypeLookup(called, method.Module, modules, kind) ||
+                                    !ReflectionTypeLiteralResolver.TryResolve(modules, argument.text, requiredAssembly, out components))
+                                { unknown.Add(callSite); acquisitions.Add(Acquisition(method, called, callSite, index, kind, true, null)); continue; }
+                                // Resolve the whole tree before exposing any
+                                // evidence: an unresolved argument invalidates
+                                // the entire acquisition, never just that edge.
+                                foreach (var component in components)
+                                    evidence.Add(new ReflectionDependencyEvidence { callSite = callSite, target = argument.text,
+                                        provider = component.provider, typeName = component.typeName, kind = kind });
+                                continue;
+                            }
                             ResolveType(modules, argument.text, requiredAssembly, kind == "GetComponent", out provider, out typeName);
                         }
                         if (provider == null || !modules.ContainsKey(provider)) { unknown.Add(callSite); acquisitions.Add(Acquisition(method, called, callSite, index, kind, true, null)); continue; }
@@ -186,7 +207,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 }
             }
             definition.references = staticReferences.OrderBy(value => value, StringComparer.Ordinal).ToArray();
-            definition.reflectionDependencies = evidence.GroupBy(item => item.callSite + "\n" + item.kind + "\n" + item.target + "\n" + item.provider)
+            definition.reflectionDependencies = evidence.GroupBy(item => item.callSite + "\n" + item.kind + "\n" + item.target + "\n" + item.provider + "\n" + item.typeName)
                 .Select(group => group.First()).ToArray();
             definition.unknownReflectionCallSites = unknown.OrderBy(value => value, StringComparer.Ordinal).ToArray();
             definition.managedAcquisitions = acquisitions.ToArray();
@@ -445,6 +466,21 @@ namespace HybridCLR.Editor.AssemblyShadow
                 sig.RetType is ClassSig && IsTrustedCoreType(sig.RetType.ToTypeDefOrRef(), "System.Reflection.Assembly", module, modules) &&
                 (parameter == "System.String" ? sig.Params[0].ElementType == ElementType.String :
                  sig.Params[0] is ClassSig && IsTrustedCoreType(sig.Params[0].ToTypeDefOrRef(), parameter, module, modules));
+        }
+
+        private static bool IsTrustedConstructedTypeLookup(IMethod method, ModuleDef module,
+            IReadOnlyDictionary<string, ModuleDefMD> modules, string kind)
+        {
+            if (method == null || method is MethodSpec || method.MethodSig == null) return false;
+            MethodSig signature = method.MethodSig;
+            // No resolver callbacks or ignoreCase overload. The latter needs a
+            // separate ambiguity proof and is not part of this bounded grammar.
+            return signature.CallingConvention == (kind == "Assembly.GetType" ? CallingConvention.HasThis : CallingConvention.Default) &&
+                signature.GenParamCount == 0 && signature.ParamsAfterSentinel == null &&
+                signature.Params.Count >= 1 && signature.Params.Count <= 2 && signature.Params[0].ElementType == ElementType.String &&
+                (signature.Params.Count == 1 || signature.Params[1].ElementType == ElementType.Boolean) &&
+                IsTrustedCoreType(method.DeclaringType, kind == "Assembly.GetType" ? "System.Reflection.Assembly" : "System.Type", module, modules) &&
+                signature.RetType is ClassSig && IsTrustedCoreType(signature.RetType.ToTypeDefOrRef(), "System.Type", module, modules);
         }
 
         private static string StringNameLoadProvider(IMethod method, ModuleDef module,

@@ -468,7 +468,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             foreach (ReflectionDependencyEvidence dependency in evidence)
             {
                 string reference = dependency.callSite + "|" + dependency.target;
-                AssemblyPolicyDefinition providerDefinition;
+                AssemblyPolicyDefinition providerDefinition = null;
                 bool known = !string.IsNullOrEmpty(dependency.provider) && byName.TryGetValue(dependency.provider, out providerDefinition);
                 if (!string.IsNullOrEmpty(dependency.provider) && byName.TryGetValue(dependency.provider, out providerDefinition))
                     CheckFilteredReference(consumer, providerDefinition, result);
@@ -483,7 +483,11 @@ namespace HybridCLR.Editor.AssemblyShadow
                 }
                 if (!known && policy.rejectUnknownReflectionDependencies)
                     result.Error("UnknownReflectionDependency", consumer.name + " reflection reference is not a compiled or declared dependency: " + reference);
+                // Captured framework/reference routing is metadata evidence,
+                // not a business graph edge. Actual Runtime descriptors never
+                // take this exemption, even if named like a framework facade.
                 else if (known && !string.Equals(consumer.name, dependency.provider, StringComparison.OrdinalIgnoreCase) &&
+                    providerDefinition.classification != AssemblyClassification.Reference &&
                     !HasDeclaredDependency(policy, consumer.name, dependency.provider) &&
                     !(consumer.references ?? new string[0]).Any(item => string.Equals(AssemblyNamePolicy.Canonical(item), dependency.provider, StringComparison.OrdinalIgnoreCase)))
                     result.Error("UndeclaredReflectionDependency", consumer.name + " reflection reference requires explicit dependency evidence: " + dependency.provider);
