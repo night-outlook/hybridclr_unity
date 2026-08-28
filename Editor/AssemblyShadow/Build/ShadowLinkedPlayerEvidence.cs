@@ -104,6 +104,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             ValidateReceipt(player);
             File.WriteAllText(Path.Combine(destination, ReceiptName), JsonUtility.ToJson(linked, true), new UTF8Encoding(false));
             ReadAndVerify(snapshotRoot, player);
+            ShadowRawTypeAdmissionEvidence.CaptureLinked(snapshotRoot, player);
         }
 
         public static string ComputeHash(LinkedPlayerReceipt receipt)

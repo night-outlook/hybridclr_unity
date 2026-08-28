@@ -30,6 +30,9 @@ namespace HybridCLR.Editor.AssemblyShadow
         public ReflectionDependencyEvidence[] reflectionDependencies = new ReflectionDependencyEvidence[0];
         public ManagedAcquisitionEvidence[] managedAcquisitions = new ManagedAcquisitionEvidence[0];
         public string sourcePath;
+        // Only the compiled scanner can attach identity-bound raw admission
+        // evidence. Serialized booleans or method-level prose cannot create it.
+        internal readonly HashSet<ReflectionDependencyEvidence> rawTypeAdmissionDependencies = new HashSet<ReflectionDependencyEvidence>();
     }
 
     // Alias retained for callers that describe source asmdefs rather than
@@ -83,7 +86,8 @@ namespace HybridCLR.Editor.AssemblyShadow
     {
         public static ShadowPolicyValidationResult ValidateCompiled(CompiledAssemblySet set,
             ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration = null,
-            IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null, VerifiedLinkedRuntimeReferences linkedRuntimeReferences = null)
+            IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null, VerifiedLinkedRuntimeReferences linkedRuntimeReferences = null,
+            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null)
         {
             if (set == null)
             {
@@ -93,11 +97,12 @@ namespace HybridCLR.Editor.AssemblyShadow
             }
             var bindingErrors = new ShadowPolicyValidationResult();
             var bindings = VerifyAcquisitions(set, policy, acquisitionConfiguration, fixedImageEvidence, bindingErrors);
+            var rawAdmissions = VerifyRawTypeAdmissions(set, rawTypeAdmissionConfiguration, bindingErrors);
             var definitions = new List<AssemblyPolicyDefinition>();
             foreach (KeyValuePair<string, AssemblyDescriptor> pair in set.Assemblies)
             {
                 AssemblyPolicyDefinition definition = FromDescriptor(pair.Value);
-                if (IsRuntime(definition)) ReflectionDependencyScanner.ScanVerified(set.Modules, pair.Key, definition, bindings);
+                if (IsRuntime(definition)) ReflectionDependencyScanner.ScanVerified(set.Modules, pair.Key, definition, bindings, rawAdmissions);
                 definitions.Add(definition);
             }
             // Resolver modules are evidence for references, not missing Player
@@ -126,6 +131,34 @@ namespace HybridCLR.Editor.AssemblyShadow
             var result = ValidateDefinitionsInternal(definitions, policy, utcNow, removedReferences);
             foreach (var error in bindingErrors.Diagnostics) result.Error(error.code, error.message);
             return result;
+        }
+
+        private static VerifiedRawTypeAdmission[] VerifyRawTypeAdmissions(CompiledAssemblySet set,
+            RawTypeAdmissionConfiguration configuration, ShadowPolicyValidationResult errors)
+        {
+            if (configuration == null) return new VerifiedRawTypeAdmission[0];
+            try
+            {
+                var proofs = RawTypeAdmissionVerifier.Verify(set.Modules, configuration);
+                foreach (var proof in proofs)
+                {
+                    AssemblyDescriptor consumer, provider;
+                    string consumerName = new AssemblyNameInfo(proof.ConsumerAssemblyIdentity).Name.String;
+                    string providerName = new AssemblyNameInfo(proof.ProviderAssemblyIdentity).Name.String;
+                    if (!set.Assemblies.TryGetValue(consumerName, out consumer) ||
+                        (consumer.classification != AssemblyClassification.Runtime && consumer.classification != AssemblyClassification.NormalHotUpdate))
+                        throw new ReflectionBindingException("InvalidRawAdmissionConsumerRole", proof.SiteId + ": an actual Player runtime consumer is required.");
+                    if (!set.Assemblies.TryGetValue(providerName, out provider) || provider.classification != AssemblyClassification.Runtime ||
+                        !provider.isShadowCapable || provider.isBootstrap)
+                        throw new ReflectionBindingException("InvalidRawAdmissionProviderRole", proof.SiteId + ": an actual non-Bootstrap Runtime candidate is required.");
+                }
+                return proofs;
+            }
+            catch (Exception error)
+            {
+                errors.Error("InvalidRawTypeAdmissionContract", error.Message);
+                return new VerifiedRawTypeAdmission[0];
+            }
         }
 
         private static VerifiedReflectionBinding[] VerifyAcquisitions(CompiledAssemblySet set, ShadowPolicyConfiguration policy,
@@ -442,7 +475,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 {
                     bool stableReference = !string.IsNullOrEmpty(dependency.provider) && byName.TryGetValue(dependency.provider, out providerDefinition) &&
                         providerDefinition.classification == AssemblyClassification.Reference;
-                    if (!stableReference && !BootstrapIsolationRule.IsApprovedReflection(consumer, reference, policy, utcNow, dependency.provider, dependency.typeName))
+                    if (!stableReference && !consumer.rawTypeAdmissionDependencies.Contains(dependency) &&
+                        !BootstrapIsolationRule.IsApprovedReflection(consumer, reference, policy, utcNow, dependency.provider, dependency.typeName))
                         result.Error("BootstrapReflection", "Bootstrap reflection reference is not an approved entrypoint: " + consumer.name + " -> " + reference);
                     continue;
                 }

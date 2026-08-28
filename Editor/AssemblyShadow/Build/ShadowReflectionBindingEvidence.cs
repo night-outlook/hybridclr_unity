@@ -35,7 +35,7 @@ namespace HybridCLR.Editor.AssemblyShadow
 
         public static string[] CompilationDefines(IEnumerable<string> userDefines)
         {
-            string[] supplied = (userDefines ?? new string[0]).ToArray();
+            string[] supplied = ShadowRawTypeAdmissionEvidence.CompilationDefines(userDefines);
             ShadowHash.Require(!supplied.Any(IsControlDefine), "ReservedCompilerDefine", "Reflection binding control defines are generated from the configuration, not caller supplied.");
             string path = ReflectionBindingConfiguration.ProjectRelativePath;
             if (!File.Exists(path)) return ShadowHash.Sorted(supplied);
@@ -49,7 +49,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             string[] defines = (compilationDefines ?? new string[0]).ToArray();
             string ignored;
             ReflectionBindingDefines.TryGetEnabledHash(defines, out ignored);
-            return defines.Where(value => !IsControlDefine(value)).ToArray();
+            return ShadowRawTypeAdmissionEvidence.UserDefines(defines.Where(value => !IsControlDefine(value)));
         }
 
         public static void ValidateProjectImages()
@@ -180,12 +180,14 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             RequirePolicy(policy, root, receipt, requireLinked);
             var configuration = ReadAndVerify(root, receipt, requireLinked);
+            var rawConfiguration = ShadowRawTypeAdmissionEvidence.ReadAndVerify(root, receipt, requireLinked);
             return ShadowAssemblyPolicyValidator.ValidateCompiled(set, policy, DateTime.UtcNow,
-                configuration, ReadFixedImages(root, configuration), linkedRuntimeReferences);
+                configuration, ReadFixedImages(root, configuration), linkedRuntimeReferences, rawConfiguration);
         }
 
         public static void Copy(string source, string destination, AssemblySnapshotReceipt receipt)
         {
+            ShadowRawTypeAdmissionEvidence.Copy(source, destination, receipt);
             string expectedHash;
             if (!ReflectionBindingDefines.TryGetEnabledHash(receipt.extraScriptingDefines, out expectedHash)) return;
             var configuration = ReadAndVerify(source, receipt, receipt.linkedPlayerReceipt != null);

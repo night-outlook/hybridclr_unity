@@ -101,6 +101,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             var actual = Directory.GetFiles(root, "*.dll", SearchOption.AllDirectories).Select(Path.GetFullPath);
             ShadowHash.Require(expected.SetEquals(actual), "SnapshotSetMismatch", "Snapshot contains undeclared or missing DLLs.");
             ShadowReflectionBindingEvidence.ReadAndVerify(root, result, requirePlayer);
+            ShadowRawTypeAdmissionEvidence.ReadAndVerify(root, result, requirePlayer);
             return result;
         }
 
@@ -143,6 +144,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 sourcePins = pins, extraScriptingDefines = ShadowHash.Sorted(defines ?? new string[0]), assemblies = assemblies, references = references, filteredAssemblies = filtered,
             };
             ShadowReflectionBindingEvidence.Capture(root, receipt);
+            ShadowRawTypeAdmissionEvidence.Capture(root, receipt);
             receipt.snapshotHash = ComputeHash(receipt);
             WriteReceipt(root, receipt);
             return receipt;

@@ -58,7 +58,7 @@ namespace HybridCLR.Editor.AssemblyShadow
         { ScanVerified(modules, assemblyName, definition, new VerifiedReflectionBinding[0]); }
 
         internal static void ScanVerified(IReadOnlyDictionary<string, ModuleDefMD> modules, string assemblyName, AssemblyPolicyDefinition definition,
-            IEnumerable<VerifiedReflectionBinding> verifiedBindings)
+            IEnumerable<VerifiedReflectionBinding> verifiedBindings, IEnumerable<VerifiedRawTypeAdmission> rawTypeAdmissions = null)
         {
             ModuleDefMD module;
             if (modules == null || !modules.TryGetValue(assemblyName, out module))
@@ -69,6 +69,9 @@ namespace HybridCLR.Editor.AssemblyShadow
             // identities retain their original case. Match using the same rule.
             string canonicalAssembly = AssemblyIdentityUtil.CanonicalName(assemblyName);
             var assemblyBindings = verifiedBindings.Where(binding => AssemblyIdentityUtil.CanonicalName(binding.Assembly) == canonicalAssembly).ToArray();
+            var rawAdmissions = (rawTypeAdmissions ?? new VerifiedRawTypeAdmission[0]).Where(binding =>
+                AssemblyIdentityUtil.CanonicalName(new AssemblyNameInfo(binding.ConsumerAssemblyIdentity).Name.String) == canonicalAssembly).ToArray();
+            definition.rawTypeAdmissionDependencies.Clear();
             var guardedSites = assemblyBindings.ToDictionary(binding => binding.OriginalMethod);
             var fixedGuards = assemblyBindings.Where(binding => binding.Kind == "FixedAssemblyBytes")
                 .ToDictionary(binding => binding.GuardMethod);
@@ -121,6 +124,22 @@ namespace HybridCLR.Editor.AssemblyShadow
                             continue;
                         }
                         if (instruction.OpCode.Code != Code.Call && instruction.OpCode.Code != Code.Callvirt) continue;
+                        var rawAdmission = rawAdmissions.FirstOrDefault(binding => binding.Matches(method, index));
+                        if (rawAdmission != null)
+                        {
+                            bool receiverLoad = index == rawAdmission.ReceiverLoadIndex;
+                            string rawKind = receiverLoad ? "Assembly.Load" : rawAdmission.Kind;
+                            string providerName = AssemblyIdentityUtil.CanonicalName(new AssemblyNameInfo(rawAdmission.ProviderAssemblyIdentity).Name.String);
+                            var rawEvidence = new ReflectionDependencyEvidence { callSite = callSite, provider = providerName,
+                                target = receiverLoad || string.IsNullOrEmpty(rawAdmission.TypeName) ? rawAdmission.ReceiverLiteral : rawAdmission.TypeName,
+                                typeName = rawAdmission.TypeName, kind = "RawTypeAdmission." + rawKind };
+                            evidence.Add(rawEvidence); definition.rawTypeAdmissionDependencies.Add(rawEvidence);
+                            var rawAcquisition = Acquisition(method, called, callSite, index, rawKind, true, null);
+                            rawAcquisition.verified = true; rawAcquisition.configurationHash = rawAdmission.ConfigurationHash;
+                            rawAcquisition.siteId = rawAdmission.SiteId; rawAcquisition.provider = providerName;
+                            acquisitions.Add(rawAcquisition);
+                            continue;
+                        }
                         VerifiedReflectionBinding guardedSite;
                         if (guardedSites.TryGetValue(method, out guardedSite) && index == guardedSite.OperationIndex)
                             acquisitions.Add(Acquisition(method, called, callSite, index, guardedSite.Kind, true, guardedSite));
@@ -193,7 +212,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             {
                 // Member and attribute metadata can expose declaring/attribute
                 // types just as directly as a type enumeration or token lookup.
-                // These operations have no supported finite contract yet.
+                // Except for independently verified literal raw-admission sites,
+                // these operations have no supported finite contract.
                 switch (name)
                 {
                     case "GetTypes": case "GetType": case "FindTypes":
