@@ -129,7 +129,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         {
             using (var fixture = new Fixture(customizeConsumer: module =>
             {
-                var host = module.Types.Single(type => type.Name == "Host"); var original = host.Methods.Single(method => method.Name == "Run");
+                var host = module.Types.Single(type => type.Name == "Host"); var original = host.Methods.Single(value => value.Name == "Run");
                 Fixture.AddForwarder(module, host, "<Factory>b__0", original);
                 var importer = new Importer(module); var factory = Fixture.Method(host, "Factory", MethodSig.CreateStatic(importer.Import(typeof(Func<Type[]>)).ToTypeSig()));
                 factory.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
@@ -172,6 +172,88 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             })) StringAssert.Contains("RawSelectorFieldExposure", fixture.Validate(fixture.Configuration).ToString());
         }
 
+        [Test] public void CallerOwnedMutableOutputsCannotHideProviderSelection()
+        {
+            foreach (string access in new[] { "array", "alias", "nested-array", "byref", "field", "writer", "collection", "return-alias", "published-local" })
+            using (var fixture = new Fixture(brokerAccess: "output-" + access))
+            {
+                CollectionAssert.AreEquivalent(new[] { "mscorlib", "consumer" }, fixture.Set.Get("Outside").references, access);
+                var graph = new AssemblyReferenceGraph(fixture.Set.Assemblies.Values, fixture.Policy.dependencies);
+                CollectionAssert.AreEqual(new[] { "Candidate" }, graph.ReverseClosure(new[] { "Candidate" }), access);
+                string diagnostic = access == "field" ? "RawSelectorFieldExposure" : access == "byref" ? "RawSelectorIndirectStoreExposure" : access == "collection" ? "RawSelectorUnprovedOutputCall" : "RawSelectorOutputExposure";
+                StringAssert.Contains(diagnostic, fixture.Validate(fixture.Configuration).ToString(), access);
+                fixture.Policy.dependencies.runtimeDependencies = new[] { new DeclaredRuntimeDependency { consumer = "Outside", provider = "Candidate", kind = "selector", evidence = "Truthful edges cannot authorize unsupported output storage." } };
+                StringAssert.Contains(diagnostic, fixture.Validate(fixture.Configuration).ToString(), access + " must still reject unsupported output exposure after the edge is declared.");
+            }
+        }
+
+        [Test] public void FreshLocalMaterializationAndReadOnlyMutableInputsRemainAllowed()
+        {
+            using (var fixture = new Fixture(customizeConsumer: module => Fixture.AddLocalOutputPlumbing(module)))
+                Assert.IsTrue(fixture.Validate(fixture.Configuration).IsValid, fixture.Validate(fixture.Configuration).ToString());
+        }
+
+        [Test] public void CustomDelegateInvokeSignatureCannotPublishSelectedHandles()
+        {
+            using (var fixture = new Fixture(brokerAccess: "custom-callback"))
+            {
+                CollectionAssert.AreEquivalent(new[] { "mscorlib", "consumer" }, fixture.Set.Get("Outside").references);
+                CollectionAssert.AreEqual(new[] { "Candidate" }, new AssemblyReferenceGraph(fixture.Set.Assemblies.Values, fixture.Policy.dependencies).ReverseClosure(new[] { "Candidate" }));
+                StringAssert.Contains("RawSelectorCallbackExposure", fixture.Validate(fixture.Configuration).ToString());
+            }
+        }
+
+        [Test] public void CompositeBrokerTokensRemainForbiddenEvenWithTruthfulProviderEdges()
+        {
+            foreach (string access in new[] { "generic-token", "nested-generic-token", "array-token" })
+            using (var fixture = new Fixture(brokerAccess: access, shadowOutside: true))
+            {
+                fixture.Policy.dependencies.runtimeDependencies = new[] { new DeclaredRuntimeDependency { consumer = "Outside", provider = "Candidate", kind = "selector", evidence = "Truthful provider edge does not authorize broker token exposure." } };
+                StringAssert.Contains("RawSelectorTypeTokenExposure", fixture.Validate(fixture.Configuration).ToString(), access);
+            }
+        }
+
+        [Test] public void IncomingMetadataOnlyReferencesRequireTruthfulProviderEdges()
+        {
+            foreach (string access in new[] { "metadata-field", "metadata-signature", "metadata-cross-bootstrap" })
+            using (var fixture = new Fixture(brokerAccess: access, shadowOutside: true))
+            {
+                CollectionAssert.AreEquivalent(new[] { "mscorlib", access == "metadata-cross-bootstrap" ? "forwarder" : "consumer" }, fixture.Set.Get("Outside").references);
+                StringAssert.Contains("RawSelectorDependencyMissing", fixture.Validate(fixture.Configuration).ToString(), access);
+                fixture.Policy.dependencies.runtimeDependencies = new[] { new DeclaredRuntimeDependency { consumer = "Outside", provider = "Candidate", kind = "selector assembly", evidence = "Incoming metadata reference to the selector-bearing Bootstrap." } };
+                Assert.IsTrue(fixture.Validate(fixture.Configuration).IsValid, fixture.Validate(fixture.Configuration).ToString());
+                CollectionAssert.AreEquivalent(new[] { "Candidate", "Outside" }, new AssemblyReferenceGraph(fixture.Set.Assemblies.Values, fixture.Policy.dependencies).ReverseClosure(new[] { "Candidate" }));
+            }
+        }
+
+        [Test] public void NonBrokerCompositeTokensDoNotGainSelectorRestrictions()
+        {
+            using (var fixture = new Fixture(brokerAccess: "nonbroker-token"))
+                Assert.IsTrue(fixture.Validate(fixture.Configuration).IsValid, fixture.Validate(fixture.Configuration).ToString());
+        }
+
+        [Test] public void ClosedGenericScalarProjectionAndRecursiveReadOnlyPredicatesRemainAllowed()
+        {
+            using (var fixture = new Fixture(customizeConsumer: module => Fixture.AddScalarProjection(module), includeLinqReferences: true))
+                Assert.IsTrue(fixture.Validate(fixture.Configuration).IsValid, fixture.Validate(fixture.Configuration).ToString());
+        }
+
+        [Test] public void AThrownLocalContainerCannotPublishSelectedHandles()
+        {
+            using (var fixture = new Fixture(customizeConsumer: module =>
+            {
+                var importer = new Importer(module); var host = module.Types.Single(type => type.Name == "Host");
+                var envelope = new TypeDefUser("Fixture", "SelectedException", importer.Import(typeof(Exception))) { Attributes = dnlib.DotNet.TypeAttributes.Public }; module.Types.Add(envelope);
+                var field = new FieldDefUser("Types", new FieldSig(importer.Import(typeof(Type[])).ToTypeSig()), dnlib.DotNet.FieldAttributes.Public); envelope.Fields.Add(field);
+                var ctor = new MethodDefUser(".ctor", MethodSig.CreateInstance(module.CorLibTypes.Void, field.FieldSig.Type), dnlib.DotNet.MethodImplAttributes.IL,
+                    dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.SpecialName | dnlib.DotNet.MethodAttributes.RTSpecialName) { Body = new CilBody() }; envelope.Methods.Add(ctor);
+                ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, importer.Import(typeof(Exception).GetConstructor(Type.EmptyTypes))));
+                ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Stfld, field)); ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var method = Fixture.Method(host, "ThrowSelected", MethodSig.CreateStatic(module.CorLibTypes.Void)); method.Body.Instructions.Add(Instruction.Create(OpCodes.Call, host.Methods.Single(value => value.Name == "Run")));
+                method.Body.Instructions.Add(Instruction.Create(OpCodes.Newobj, ctor)); method.Body.Instructions.Add(Instruction.Create(OpCodes.Throw));
+            })) StringAssert.Contains("RawSelectorThrownHandleExposure", fixture.Validate(fixture.Configuration).ToString());
+        }
+
         private static void AssertUntrackedBrokerRejected(string access)
         {
             using (var fixture = new Fixture(brokerAccess: access))
@@ -207,11 +289,23 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             internal readonly ShadowPolicyConfiguration Policy = new ShadowPolicyConfiguration();
             internal RawTypeAdmissionConfiguration Configuration;
             internal Fixture(bool extra = false, string brokerAccess = null, bool shadowOutside = false,
-                Action<ModuleDefUser> customizeConsumer = null, bool interfaceBridge = false)
+                Action<ModuleDefUser> customizeConsumer = null, bool interfaceBridge = false, bool includeLinqReferences = false)
             {
+                bool crossBootstrap = brokerAccess == "cross-bootstrap" || brokerAccess == "metadata-cross-bootstrap";
                 string assemblies = Path.Combine(root, "Assemblies"), references = Path.Combine(root, "References");
                 Directory.CreateDirectory(assemblies); Directory.CreateDirectory(references);
                 File.Copy(typeof(object).Assembly.Location, Path.Combine(references, "mscorlib.dll"));
+                if (includeLinqReferences)
+                {
+                    var pending = new System.Collections.Generic.Queue<Assembly>(); var copied = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+                    pending.Enqueue(typeof(Enumerable).Assembly);
+                    while (pending.Count > 0)
+                    {
+                        var assembly = pending.Dequeue(); if (!copied.Add(assembly.FullName)) continue;
+                        string path = Path.Combine(references, assembly.GetName().Name + ".dll"); if (!File.Exists(path)) File.Copy(assembly.Location, path);
+                        foreach (var reference in assembly.GetReferencedAssemblies()) pending.Enqueue(Assembly.Load(reference));
+                    }
+                }
                 using (var provider = Module("Candidate"))
                 { provider.Types.Add(new TypeDefUser("Fixture", "Payload", provider.CorLibTypes.Object.TypeDefOrRef)); provider.Write(Path.Combine(assemblies, "Candidate.dll")); }
                 if (interfaceBridge) using (var bridge = Module("Bridge")) { AddInterfaceBridge(bridge); bridge.Write(Path.Combine(assemblies, "Bridge.dll")); }
@@ -230,14 +324,17 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                         }
                     }
                     if (interfaceBridge) AddInterfaceBroker(consumer, host);
+                    if (brokerAccess != null && brokerAccess.StartsWith("output-", StringComparison.Ordinal)) AddOutputBroker(consumer, brokerAccess.Substring(7));
+                    if (brokerAccess == "custom-callback") AddCallbackBroker(consumer);
                     if (customizeConsumer != null) customizeConsumer(consumer);
                     consumer.Write(Path.Combine(assemblies, "Consumer.dll"));
                 }
-                if (brokerAccess == "cross-bootstrap")
+                if (crossBootstrap)
                     using (var forwarder = Module("Forwarder"))
                     {
                         var host = new TypeDefUser("Fixture", "ForwarderHost", forwarder.CorLibTypes.Object.TypeDefOrRef) { Attributes = dnlib.DotNet.TypeAttributes.Public }; forwarder.Types.Add(host);
-                        AddForwarder(forwarder, host, "Forward", BrokerMethod(forwarder, "Consumer", "Host", "Run"));
+                        if (brokerAccess == "metadata-cross-bootstrap") host.Fields.Add(new FieldDefUser("Metadata", new FieldSig(new ClassSig(BrokerMethod(forwarder, "Consumer", "Host", "Run").DeclaringType)), dnlib.DotNet.FieldAttributes.Public));
+                        else AddForwarder(forwarder, host, "Forward", BrokerMethod(forwarder, "Consumer", "Host", "Run"));
                         forwarder.Write(Path.Combine(assemblies, "Forwarder.dll"));
                     }
                 if (brokerAccess != null)
@@ -249,7 +346,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 var capabilities = new System.Collections.Generic.List<AssemblyCapability> {
                     new AssemblyCapability { name = "Consumer", isBootstrap = true }, new AssemblyCapability { name = "Candidate", isShadowCapable = true } };
                 if (brokerAccess != null) capabilities.Add(new AssemblyCapability { name = "Outside", isShadowCapable = shadowOutside });
-                if (brokerAccess == "cross-bootstrap") capabilities.Add(new AssemblyCapability { name = "Forwarder", isBootstrap = true });
+                if (crossBootstrap) capabilities.Add(new AssemblyCapability { name = "Forwarder", isBootstrap = true });
                 if (interfaceBridge) capabilities.Add(new AssemblyCapability { name = "Bridge" });
                 Set = DnlibAssemblyLoader.Load(assemblies, new[] { references }, capabilities);
                 if (brokerAccess == "reflection")
@@ -340,7 +437,62 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 var method = new MethodDefUser("SelectCandidateTypes", MethodSig.CreateStatic(importer.Import(typeof(Type[])).ToTypeSig()),
                     dnlib.DotNet.MethodImplAttributes.IL, dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static) { Body = new CilBody() }; host.Methods.Add(method);
                 var il = method.Body.Instructions;
-                if (access == "reflection" || access == "type-token")
+                if (access == "custom-callback")
+                {
+                    var callback = new TypeDefUser("Fixture", "SelectedCallback", importer.Import(typeof(MulticastDelegate))) { Attributes = dnlib.DotNet.TypeAttributes.Public | dnlib.DotNet.TypeAttributes.Sealed }; outside.Types.Add(callback);
+                    var ctor = new MethodDefUser(".ctor", MethodSig.CreateInstance(outside.CorLibTypes.Void, outside.CorLibTypes.Object, outside.CorLibTypes.IntPtr), dnlib.DotNet.MethodImplAttributes.Runtime,
+                        dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.SpecialName | dnlib.DotNet.MethodAttributes.RTSpecialName); callback.Methods.Add(ctor);
+                    var invoke = new MethodDefUser("Invoke", MethodSig.CreateInstance(outside.CorLibTypes.Void, importer.Import(typeof(Type[])).ToTypeSig()), dnlib.DotNet.MethodImplAttributes.Runtime,
+                        dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Virtual | dnlib.DotNet.MethodAttributes.NewSlot); callback.Methods.Add(invoke);
+                    var selected = new FieldDefUser("Selected", new FieldSig(importer.Import(typeof(Type[])).ToTypeSig()), dnlib.DotNet.FieldAttributes.Public | dnlib.DotNet.FieldAttributes.Static); host.Fields.Add(selected);
+                    var receive = Method(host, "Receive", MethodSig.CreateStatic(outside.CorLibTypes.Void, selected.FieldSig.Type)); receive.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); receive.Body.Instructions.Add(Instruction.Create(OpCodes.Stsfld, selected)); receive.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                    var target = BrokerMethod(outside, "Consumer", "Host", "SelectWithCallback"); target.MethodSig = MethodSig.CreateStatic(outside.CorLibTypes.Void, outside.CorLibTypes.String, new ClassSig(callback));
+                    il.Add(Instruction.Create(OpCodes.Ldstr, "Candidate")); il.Add(Instruction.Create(OpCodes.Ldnull)); il.Add(Instruction.Create(OpCodes.Ldftn, receive)); il.Add(Instruction.Create(OpCodes.Newobj, ctor)); il.Add(Instruction.Create(OpCodes.Call, target)); il.Add(Instruction.Create(OpCodes.Ldsfld, selected));
+                }
+                else if (access.EndsWith("-token", StringComparison.Ordinal) && access != "type-token")
+                {
+                    ITypeDefOrRef component = access == "nonbroker-token" ? outside.CorLibTypes.String.TypeDefOrRef : BrokerMethod(outside, "Consumer", "Host", "Run").DeclaringType;
+                    TypeSig token = access == "array-token" ? (TypeSig)new SZArraySig(new ClassSig(component)) : new GenericInstSig(new ClassSig(importer.Import(typeof(System.Collections.Generic.List<>))), new ClassSig(component));
+                    if (access == "nested-generic-token") token = new GenericInstSig(new ClassSig(importer.Import(typeof(System.Collections.Generic.List<>))), new SZArraySig(token));
+                    il.Add(Instruction.Create(OpCodes.Ldtoken, new TypeSpecUser(token))); il.Add(Instruction.Create(OpCodes.Pop)); il.Add(Instruction.Create(OpCodes.Ldnull));
+                }
+                else if (access.StartsWith("metadata-", StringComparison.Ordinal))
+                {
+                    var broker = new ClassSig(BrokerMethod(outside, access == "metadata-cross-bootstrap" ? "Forwarder" : "Consumer", access == "metadata-cross-bootstrap" ? "ForwarderHost" : "Host", "Run").DeclaringType);
+                    if (access == "metadata-field") host.Fields.Add(new FieldDefUser("BrokerMetadata", new FieldSig(broker), dnlib.DotNet.FieldAttributes.Public));
+                    else { var signature = Method(host, "BrokerSignature", MethodSig.CreateStatic(broker)); signature.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull)); signature.Body.Instructions.Add(Instruction.Create(OpCodes.Ret)); }
+                    il.Add(Instruction.Create(OpCodes.Ldnull));
+                }
+                else if (access.StartsWith("output-", StringComparison.Ordinal))
+                {
+                    string shape = access.Substring(7); var sink = new Local(new SZArraySig(outside.CorLibTypes.Object)); method.Body.Variables.Add(sink);
+                    il.Add(Instruction.Create(OpCodes.Ldc_I4_1)); il.Add(Instruction.Create(OpCodes.Newarr, outside.CorLibTypes.Object.TypeDefOrRef)); il.Add(Instruction.Create(OpCodes.Stloc, sink));
+                    if (shape == "nested-array")
+                    { il.Add(Instruction.Create(OpCodes.Ldloc, sink)); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldc_I4_1)); il.Add(Instruction.Create(OpCodes.Newarr, outside.CorLibTypes.Object.TypeDefOrRef)); il.Add(Instruction.Create(OpCodes.Stelem_Ref)); }
+                    if (shape == "field")
+                    {
+                        var holder = new TypeRefUser(outside, "Fixture", "OutputBox", new AssemblyRefUser("Consumer", new Version(1, 0, 0, 0)));
+                        il.Add(Instruction.Create(OpCodes.Ldloc, sink)); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Newobj, new MemberRefUser(outside, ".ctor", MethodSig.CreateInstance(outside.CorLibTypes.Void), holder))); il.Add(Instruction.Create(OpCodes.Stelem_Ref));
+                    }
+                    if (shape == "collection")
+                    { il.Add(Instruction.Create(OpCodes.Ldloc, sink)); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Newobj, importer.Import(typeof(System.Collections.ArrayList).GetConstructor(Type.EmptyTypes)))); il.Add(Instruction.Create(OpCodes.Stelem_Ref)); }
+                    var target = BrokerMethod(outside, "Consumer", "Host", "SelectInto"); target.MethodSig = MethodSig.CreateStatic(outside.CorLibTypes.Void, outside.CorLibTypes.String, sink.Type);
+                    il.Add(Instruction.Create(OpCodes.Ldstr, "Candidate")); il.Add(Instruction.Create(OpCodes.Ldloc, sink)); il.Add(Instruction.Create(OpCodes.Call, target));
+                    if (shape == "published-local") il.Add(Instruction.Create(OpCodes.Ldsfld, new MemberRefUser(outside, "Published", new FieldSig(sink.Type), target.DeclaringType)));
+                    else il.Add(Instruction.Create(OpCodes.Ldloc, sink));
+                    il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref));
+                    if (shape == "nested-array")
+                    { il.Add(Instruction.Create(OpCodes.Castclass, sink.Type.ToTypeDefOrRef())); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref)); }
+                    if (shape == "field")
+                    {
+                        var holder = new TypeRefUser(outside, "Fixture", "OutputBox", new AssemblyRefUser("Consumer", new Version(1, 0, 0, 0)));
+                        il.Add(Instruction.Create(OpCodes.Castclass, holder)); il.Add(Instruction.Create(OpCodes.Ldfld, new MemberRefUser(outside, "Value", new FieldSig(outside.CorLibTypes.Object), holder)));
+                    }
+                    if (shape == "collection")
+                    { il.Add(Instruction.Create(OpCodes.Castclass, importer.Import(typeof(System.Collections.ArrayList)))); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(System.Collections.ArrayList).GetProperty("Item").GetGetMethod()))); }
+                    il.Add(Instruction.Create(OpCodes.Castclass, importer.Import(typeof(Type[]))));
+                }
+                else if (access == "reflection" || access == "type-token")
                 {
                     if (access == "reflection")
                     {
@@ -375,6 +527,96 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                     else il.Add(Instruction.Create(OpCodes.Call, target));
                 }
                 il.Add(Instruction.Create(OpCodes.Ret));
+            }
+            private static void AddOutputBroker(ModuleDefUser module, string shape)
+            {
+                var host = module.Types.Single(type => type.Name == "Host"); var original = host.Methods.Single(value => value.Name == "Run");
+                var array = new SZArraySig(module.CorLibTypes.Object); var method = Method(host, "SelectInto", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.String, array));
+                var il = method.Body.Instructions;
+                il.Add(Instruction.Create(OpCodes.Ldarg_1));
+                if (shape == "published-local")
+                {
+                    il.Add(Instruction.Create(OpCodes.Pop)); var local = new Local(array); method.Body.Variables.Add(local);
+                    var field = new FieldDefUser("Published", new FieldSig(array), dnlib.DotNet.FieldAttributes.Public | dnlib.DotNet.FieldAttributes.Static); host.Fields.Add(field);
+                    il.Add(Instruction.Create(OpCodes.Ldc_I4_1)); il.Add(Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef)); il.Add(Instruction.Create(OpCodes.Stloc, local));
+                    il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Stsfld, field)); il.Add(Instruction.Create(OpCodes.Ldloc, local));
+                }
+                if (shape == "return-alias")
+                {
+                    var alias = Method(host, "ReturnAlias", MethodSig.CreateStatic(array, array)); alias.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); alias.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                    il.Add(Instruction.Create(OpCodes.Call, alias));
+                }
+                if (shape == "alias")
+                { var alias = new Local(array); method.Body.Variables.Add(alias); il.Add(Instruction.Create(OpCodes.Stloc, alias)); il.Add(Instruction.Create(OpCodes.Ldloc, alias)); }
+                if (shape == "nested-array")
+                { il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref)); il.Add(Instruction.Create(OpCodes.Castclass, array.ToTypeDefOrRef())); }
+                if (shape == "writer")
+                {
+                    var writer = Method(host, "WriteOpaque", MethodSig.CreateStatic(module.CorLibTypes.Void, array, module.CorLibTypes.Object));
+                    writer.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); writer.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0)); writer.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); writer.Body.Instructions.Add(Instruction.Create(OpCodes.Stelem_Ref)); writer.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                    il.Add(Instruction.Create(OpCodes.Call, original)); il.Add(Instruction.Create(OpCodes.Call, writer));
+                }
+                else if (shape == "collection")
+                {
+                    var importer = new Importer(module); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref)); il.Add(Instruction.Create(OpCodes.Castclass, importer.Import(typeof(System.Collections.ArrayList))));
+                    il.Add(Instruction.Create(OpCodes.Call, original)); il.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(System.Collections.ArrayList).GetMethod("Add")))); il.Add(Instruction.Create(OpCodes.Pop));
+                }
+                else if (shape == "field")
+                {
+                    var box = new TypeDefUser("Fixture", "OutputBox", module.CorLibTypes.Object.TypeDefOrRef) { Attributes = dnlib.DotNet.TypeAttributes.Public }; module.Types.Add(box);
+                    var ctor = new MethodDefUser(".ctor", MethodSig.CreateInstance(module.CorLibTypes.Void), dnlib.DotNet.MethodImplAttributes.IL,
+                        dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.SpecialName | dnlib.DotNet.MethodAttributes.RTSpecialName) { Body = new CilBody() }; box.Methods.Add(ctor);
+                    ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new Importer(module).Import(typeof(object).GetConstructor(Type.EmptyTypes)))); ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                    var field = new FieldDefUser("Value", new FieldSig(module.CorLibTypes.Object), dnlib.DotNet.FieldAttributes.Public); box.Fields.Add(field);
+                    // The caller supplies a mutable box through its array slot.
+                    il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref)); il.Add(Instruction.Create(OpCodes.Castclass, box));
+                    il.Add(Instruction.Create(OpCodes.Call, original)); il.Add(Instruction.Create(OpCodes.Stfld, field));
+                }
+                else
+                {
+                    il.Add(Instruction.Create(OpCodes.Ldc_I4_0));
+                    if (shape == "byref") il.Add(Instruction.Create(OpCodes.Ldelema, module.CorLibTypes.Object.TypeDefOrRef));
+                    il.Add(Instruction.Create(OpCodes.Call, original)); il.Add(Instruction.Create(shape == "byref" ? OpCodes.Stind_Ref : OpCodes.Stelem_Ref));
+                }
+                il.Add(Instruction.Create(OpCodes.Ret));
+            }
+            private static void AddCallbackBroker(ModuleDefUser module)
+            {
+                var host = module.Types.Single(type => type.Name == "Host"); var callback = new TypeRefUser(module, "Fixture", "SelectedCallback", new AssemblyRefUser("Outside", new Version(1, 0, 0, 0)));
+                var method = Method(host, "SelectWithCallback", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.String, new ClassSig(callback)));
+                method.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); method.Body.Instructions.Add(Instruction.Create(OpCodes.Call, host.Methods.Single(value => value.Name == "Run")));
+                method.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, new MemberRefUser(module, "Invoke", MethodSig.CreateInstance(module.CorLibTypes.Void, new Importer(module).Import(typeof(Type[])).ToTypeSig()), callback))); method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            }
+            internal static void AddLocalOutputPlumbing(ModuleDefUser module)
+            {
+                var host = module.Types.Single(type => type.Name == "Host"); var original = host.Methods.Single(value => value.Name == "Run");
+                var array = new SZArraySig(module.CorLibTypes.Object);
+                var readonlyMethod = Method(host, "ReadOnly", MethodSig.CreateStatic(module.CorLibTypes.Void, new Importer(module).Import(typeof(Type[])).ToTypeSig(), array));
+                readonlyMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); readonlyMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ldlen)); readonlyMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Pop)); readonlyMethod.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var method = Method(host, "LocalMaterialization", MethodSig.CreateStatic(module.CorLibTypes.Void, array)); var il = method.Body.Instructions;
+                var local = new Local(array); method.Body.Variables.Add(local);
+                il.Add(Instruction.Create(OpCodes.Ldc_I4_1)); il.Add(Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef)); il.Add(Instruction.Create(OpCodes.Stloc, local));
+                il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Call, original)); il.Add(Instruction.Create(OpCodes.Stelem_Ref));
+                il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref)); il.Add(Instruction.Create(OpCodes.Castclass, new Importer(module).Import(typeof(Type[]))));
+                il.Add(Instruction.Create(OpCodes.Ldarg_0)); il.Add(Instruction.Create(OpCodes.Call, readonlyMethod));
+                var addressLocal = new Local(module.CorLibTypes.Object); method.Body.Variables.Add(addressLocal);
+                il.Add(Instruction.Create(OpCodes.Ldloca, addressLocal)); il.Add(Instruction.Create(OpCodes.Call, original)); il.Add(Instruction.Create(OpCodes.Stind_Ref)); il.Add(Instruction.Create(OpCodes.Ldloc, addressLocal)); il.Add(Instruction.Create(OpCodes.Pop)); il.Add(Instruction.Create(OpCodes.Ret));
+            }
+            internal static void AddScalarProjection(ModuleDefUser module)
+            {
+                var host = module.Types.Single(type => type.Name == "Host"); var importer = new Importer(module);
+                var converter = Method(host, "TypeName", MethodSig.CreateStatic(module.CorLibTypes.String, importer.Import(typeof(Type)).ToTypeSig()));
+                converter.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); converter.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(Type).GetProperty("FullName").GetGetMethod()))); converter.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var recursive = Method(host, "ReadOnlyRecursive", MethodSig.CreateStatic(module.CorLibTypes.Boolean, importer.Import(typeof(Type)).ToTypeSig()));
+                var complete = Instruction.Create(OpCodes.Ldc_I4_1); recursive.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); recursive.Body.Instructions.Add(Instruction.Create(OpCodes.Brfalse, complete));
+                recursive.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); recursive.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(Type).GetProperty("DeclaringType").GetGetMethod()))); recursive.Body.Instructions.Add(Instruction.Create(OpCodes.Call, recursive)); recursive.Body.Instructions.Add(Instruction.Create(OpCodes.Ret)); recursive.Body.Instructions.Add(complete); recursive.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var report = Method(host, "ReportScalar", MethodSig.CreateStatic(module.CorLibTypes.Void, importer.Import(typeof(Action<string[]>)).ToTypeSig())); var il = report.Body.Instructions;
+                il.Add(Instruction.Create(OpCodes.Call, host.Methods.Single(value => value.Name == "Run"))); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref)); il.Add(Instruction.Create(OpCodes.Call, recursive)); il.Add(Instruction.Create(OpCodes.Pop));
+                il.Add(Instruction.Create(OpCodes.Ldarg_0)); il.Add(Instruction.Create(OpCodes.Call, host.Methods.Single(value => value.Name == "Run"))); il.Add(Instruction.Create(OpCodes.Ldnull)); il.Add(Instruction.Create(OpCodes.Ldftn, converter));
+                il.Add(Instruction.Create(OpCodes.Newobj, importer.Import(typeof(Func<Type, string>).GetConstructor(new[] { typeof(object), typeof(IntPtr) }))));
+                var select = typeof(Enumerable).GetMethods().Single(value => value.Name == "Select" && value.GetParameters().Length == 2 && value.GetParameters()[1].ParameterType.GetGenericArguments().Length == 2).MakeGenericMethod(typeof(Type), typeof(string));
+                il.Add(Instruction.Create(OpCodes.Call, importer.Import(select))); il.Add(Instruction.Create(OpCodes.Call, importer.Import(typeof(Enumerable).GetMethod("ToArray").MakeGenericMethod(typeof(string)))));
+                il.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(Action<string[]>).GetMethod("Invoke")))); il.Add(Instruction.Create(OpCodes.Ret));
             }
             private static void AddMethod(ModuleDefUser module, TypeDef host, string name, bool indirect)
             {
