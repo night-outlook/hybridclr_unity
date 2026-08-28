@@ -8,6 +8,8 @@ namespace HybridCLR
     // JsonUtility reads the complete native schema, including fields unused by
     // managed callers. Preserve fields explicitly: preserving a type alone only
     // retains its constructor, so linked Players can otherwise lose evidence.
+    // Native uint64_t and arm64 size_t values are unsigned JSON integer tokens;
+    // keep their full range rather than narrowing thread hashes or counters.
     [Serializable, Preserve]
     public sealed class AssemblyShadowDiagnostics
     {
@@ -20,13 +22,13 @@ namespace HybridCLR
         [Preserve] public string detail;
         [Preserve] public string baselineBuildId;
         [Preserve] public string patchId;
-        [Preserve] public long generation;
-        [Preserve] public long expected;
-        [Preserve] public long staged;
-        [Preserve] public long retainedBytes;
-        [Preserve] public long enumerationGeneration;
+        [Preserve] public ulong generation;
+        [Preserve] public ulong expected;
+        [Preserve] public ulong staged;
+        [Preserve] public ulong retainedBytes;
+        [Preserve] public ulong enumerationGeneration;
         [Preserve] public AssemblyShadowOrdinaryAssembly[] ordinaryAssemblies;
-        [Preserve] public long classEnumerationGeneration;
+        [Preserve] public ulong classEnumerationGeneration;
         [Preserve] public AssemblyShadowOrdinaryClass[] ordinaryClasses;
         [Preserve] public string[] closureLoadOrder;
         [Preserve] public string[] stableAotNames;
@@ -106,11 +108,11 @@ namespace HybridCLR
     [Serializable, Preserve]
     public sealed class AssemblyShadowDiagnosticEvent
     {
-        [Preserve] public long sequence;
+        [Preserve] public ulong sequence;
         [Preserve] public string kind;
         [Preserve] public string name;
-        [Preserve] public long generation;
-        [Preserve] public int stagedCount;
+        [Preserve] public ulong generation;
+        [Preserve] public ulong stagedCount;
     }
 
     [Serializable, Preserve]
@@ -120,7 +122,7 @@ namespace HybridCLR
         [Preserve] public string kind;
         [Preserve] public string detail;
         [Preserve] public string type;
-        [Preserve] public long thread;
-        [Preserve] public long timestamp;
+        [Preserve] public ulong thread;
+        [Preserve] public ulong timestamp;
     }
 }

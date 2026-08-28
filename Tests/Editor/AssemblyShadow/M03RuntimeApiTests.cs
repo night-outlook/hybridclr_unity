@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.Scripting;
@@ -10,6 +12,15 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
 {
     public sealed class M03RuntimeApiTests
     {
+        // AssemblyShadowDiagnostics.h: uint64_t plus the arm64 size_t fields.
+        // This inventory is independent of the managed declarations under test.
+        private static readonly Dictionary<Type, string[]> NativeUnsignedFields = new Dictionary<Type, string[]>
+        {
+            { typeof(AssemblyShadowDiagnostics), new[] { "generation", "expected", "staged", "retainedBytes", "enumerationGeneration", "classEnumerationGeneration" } },
+            { typeof(AssemblyShadowDiagnosticEvent), new[] { "sequence", "generation", "stagedCount" } },
+            { typeof(AssemblyShadowBaselineUse), new[] { "thread", "timestamp" } },
+        };
+
         [Test]
         public void ContractEnumsAndAbiAreStable()
         {
@@ -124,6 +135,86 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             AssertSchemaValuesEqual(expected, AssemblyShadowDiagnostics.Parse(JsonUtility.ToJson(expected)), "diagnostics");
         }
 
+        [Test]
+        public void DiagnosticsUnsignedFieldsMatchNativeContract()
+        {
+            var expected = new List<string>();
+            foreach (var entry in NativeUnsignedFields)
+            {
+                foreach (string name in entry.Value)
+                {
+                    FieldInfo field = entry.Key.GetField(name, BindingFlags.Public | BindingFlags.Instance);
+                    string path = entry.Key.FullName + "." + name;
+                    Assert.That(field, Is.Not.Null, path);
+                    Assert.That(field.FieldType, Is.EqualTo(typeof(ulong)), path + " must match native unsigned width");
+                    expected.Add(path);
+                }
+            }
+            string[] actual = DiagnosticSchemaTypes()
+                .SelectMany(type => type.GetFields(BindingFlags.Public | BindingFlags.Instance)
+                    .Where(field => field.FieldType == typeof(ulong))
+                    .Select(field => type.FullName + "." + field.Name)).ToArray();
+            Assert.That(expected.Count, Is.EqualTo(11));
+            Assert.That(actual, Is.EquivalentTo(expected), "Every unsigned field must have an explicit native contract and boundary cases.");
+        }
+
+        private static IEnumerable<TestCaseData> UnsignedNumberCases()
+        {
+            string[] tokens = {
+                "0", "1", "4294967295", "4294967296", "4294967297",
+                "9007199254740991", "9007199254740992", "9007199254740993",
+                "9223372036854775807", "9223372036854775808",
+                "18199233411598851025", "18446744073709551615"
+            };
+            foreach (var entry in NativeUnsignedFields)
+                foreach (string field in entry.Value)
+                    foreach (string token in tokens)
+                        yield return new TestCaseData(entry.Key, field, token)
+                            .SetName("UnsignedToken_" + entry.Key.Name + "_" + field + "_" + token);
+        }
+
+        [TestCaseSource(nameof(UnsignedNumberCases))]
+        public void DiagnosticsUnsignedNumericTokensParseAndSerializeExactly(Type ownerType, string fieldName, string token)
+        {
+            ulong expected = ulong.Parse(token, NumberStyles.None, CultureInfo.InvariantCulture);
+            string container = ownerType == typeof(AssemblyShadowDiagnosticEvent) ? "events" :
+                ownerType == typeof(AssemblyShadowBaselineUse) ? "baselineUses" : null;
+            string member = "\"" + fieldName + "\":" + token;
+            // Construct the native numeric token directly, not through a managed
+            // serializer that might already have rounded or coerced the value.
+            string json = "{\"schemaVersion\":1," + (container == null ? member : "\"" + container + "\":[{" + member + "}]") + "}";
+            AssemblyShadowDiagnostics value = AssemblyShadowDiagnostics.Parse(json);
+            AssertUnsignedFieldValue(value, ownerType, fieldName, container, expected);
+
+            string serialized = JsonUtility.ToJson(value);
+            string scope = serialized;
+            if (container != null)
+            {
+                Match array = Regex.Match(serialized, "\"" + container + "\"\\s*:\\s*\\[\\s*(\\{[^{}]*\\})\\s*\\]");
+                Assert.That(array.Success, Is.True, "Serialized DTO array is missing: " + container);
+                scope = array.Groups[1].Value;
+            }
+            MatchCollection numbers = Regex.Matches(scope, "\"" + Regex.Escape(fieldName) + "\"\\s*:\\s*([^\\s,}\\]]+)");
+            Assert.That(numbers.Count, Is.EqualTo(1), "Expected exactly one numeric field: " + fieldName);
+            Assert.That(numbers[0].Groups[1].Value, Is.EqualTo(token), "Numeric token must not be a float, string, narrowed integer or rounded value.");
+            AssertUnsignedFieldValue(AssemblyShadowDiagnostics.Parse(serialized), ownerType, fieldName, container, expected);
+        }
+
+        private static void AssertUnsignedFieldValue(AssemblyShadowDiagnostics value, Type ownerType, string fieldName, string container, ulong expected)
+        {
+            object owner = value;
+            if (container != null)
+            {
+                var array = (Array)typeof(AssemblyShadowDiagnostics).GetField(container).GetValue(value);
+                Assert.That(array, Is.Not.Null, container);
+                Assert.That(array.Length, Is.EqualTo(1), container);
+                owner = array.GetValue(0);
+            }
+            FieldInfo field = ownerType.GetField(fieldName);
+            Assert.That(field.FieldType, Is.EqualTo(typeof(ulong)), ownerType.Name + "." + fieldName);
+            Assert.That(field.GetValue(owner), Is.EqualTo(expected), ownerType.Name + "." + fieldName);
+        }
+
         private static IEnumerable<Type> DiagnosticSchemaTypes()
         {
             var pending = new Queue<Type>();
@@ -143,7 +234,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
 
         private static bool IsSchemaScalar(Type type)
         {
-            return type == typeof(string) || type == typeof(bool) || type == typeof(int) || type == typeof(long);
+            return type == typeof(string) || type == typeof(bool) || type == typeof(int) || type == typeof(long) || type == typeof(ulong);
         }
 
         private static object CreateSchemaValue(Type type, string path, HashSet<Type> ancestors)
@@ -152,6 +243,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             if (type == typeof(bool)) return true;
             if (type == typeof(int)) return 17;
             if (type == typeof(long)) return 4294967297L;
+            if (type == typeof(ulong)) return ulong.MaxValue;
             if (type.IsArray)
             {
                 Array array = Array.CreateInstance(type.GetElementType(), 1);
