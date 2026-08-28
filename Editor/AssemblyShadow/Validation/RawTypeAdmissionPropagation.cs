@@ -332,13 +332,24 @@ namespace HybridCLR.Editor.AssemblyShadow
             {
                 internal readonly List<Value> Stack = new List<Value>();
                 internal readonly Dictionary<int, Value> Heap = new Dictionary<int, Value>();
-                internal Flow Copy() { var value = new Flow(); value.Stack.AddRange(Stack.Select(item => item.Copy())); foreach (var pair in Heap) value.Heap.Add(pair.Key, pair.Value.Copy()); return value; }
+                internal readonly HashSet<int> Published = new HashSet<int>();
+                internal Flow Copy() { var value = new Flow(); value.Stack.AddRange(Stack.Select(item => item.Copy())); foreach (var pair in Heap) value.Heap.Add(pair.Key, pair.Value.Copy()); value.Published.UnionWith(Published); return value; }
                 internal Value Pop() { if (Stack.Count == 0) throw new ReflectionBindingException("UnsupportedRawSelectorFlow", "Stack underflow while proving selected-value effects."); var value = Stack[Stack.Count - 1]; Stack.RemoveAt(Stack.Count - 1); return Read(value); }
                 internal Value Read(Value value)
                 {
                     var result = value.Copy(); var pending = new Queue<int>(result.Roots); var seen = new HashSet<int>();
-                    while (pending.Count > 0) { int root = pending.Dequeue(); Value content; if (!seen.Add(root) || !Heap.TryGetValue(root, out content)) continue; result.Merge(content); foreach (int child in content.Roots) pending.Enqueue(child); }
+                    result.External |= result.Roots.Any(Published.Contains);
+                    // Contents can contain selected values without making their
+                    // fresh parent externally owned. Keep identity and reachability
+                    // separate; publication explicitly walks the reachable graph.
+                    while (pending.Count > 0) { int root = pending.Dequeue(); Value content; if (!seen.Add(root) || !Heap.TryGetValue(root, out content)) continue; result.Selected |= content.Selected; foreach (int child in content.Roots) pending.Enqueue(child); }
                     return result;
+                }
+                internal Value Content(Value address)
+                {
+                    address = Read(address); var result = new Value(); bool known = false;
+                    foreach (int root in address.Roots) { Value content; if (Heap.TryGetValue(root, out content)) { result.Merge(Read(content)); known = true; } }
+                    return known ? result : address;
                 }
                 internal void Write(Value address, Value value)
                 { foreach (int root in address.Roots) { Value content; if (!Heap.TryGetValue(root, out content)) Heap[root] = value.Copy(); else content.Merge(value); } }
@@ -348,13 +359,17 @@ namespace HybridCLR.Editor.AssemblyShadow
                     if (Stack.Count != other.Stack.Count) throw new ReflectionBindingException("UnsupportedRawSelectorFlow", "Inconsistent stack height while proving selected-value effects.");
                     for (int index = 0; index < Stack.Count; index++) changed |= Stack[index].Merge(other.Stack[index]);
                     foreach (var pair in other.Heap) { Value value; if (!Heap.TryGetValue(pair.Key, out value)) { Heap[pair.Key] = pair.Value.Copy(); changed = true; } else changed |= value.Merge(pair.Value); }
+                    foreach (int root in other.Published) changed |= Published.Add(root);
                     return changed;
                 }
             }
             private sealed class Effects
             {
                 internal readonly Value Returned = new Value();
-                internal readonly HashSet<int> WrittenArguments = new HashSet<int>();
+                internal readonly Dictionary<int, Value> ArgumentContents = new Dictionary<int, Value>();
+                internal readonly Dictionary<int, Value> Heap = new Dictionary<int, Value>();
+                internal readonly HashSet<int> PublishedArguments = new HashSet<int>();
+                internal readonly HashSet<int> PublishedRoots = new HashSet<int>();
             }
             private void CheckSelectedEffects(MethodDef method)
             { AnalyzeEffects(method, null, new HashSet<MethodDef>()); }
@@ -365,6 +380,10 @@ namespace HybridCLR.Editor.AssemblyShadow
                 if (!active.Add(method)) throw new ReflectionBindingException("UnsupportedRawSelectorFlow", "Recursive selected-value effect requires an unavailable proof: " + method.FullName);
                 var arguments = method.Parameters.Where(parameter => !parameter.IsReturnTypeParameter).Select((parameter, index) =>
                     Value.Root(-index - 1, inputs == null || inputs[index].External, inputs != null && inputs[index].Selected)).ToArray();
+                if (inputs != null)
+                    for (int index = 0; index < arguments.Length; index++)
+                        for (int other = 0; other < arguments.Length; other++)
+                            if (inputs[index].Roots.Overlaps(inputs[other].Roots)) arguments[index].Roots.Add(-other - 1);
                 var indices = il.Select((instruction, index) => new { instruction, index }).ToDictionary(value => value.instruction, value => value.index);
                 var states = new Flow[il.Count]; var pending = new Queue<int>();
                 Action<int, Flow> enter = (index, flow) => { if (index < 0 || index >= states.Length) return; if (states[index] == null) { states[index] = flow.Copy(); pending.Enqueue(index); } else if (states[index].Merge(flow)) pending.Enqueue(index); };
@@ -418,9 +437,9 @@ namespace HybridCLR.Editor.AssemblyShadow
                         StoreSelected(method, index, state, address, value, effects, "RawSelectorIndirectStoreExposure");
                     }
                     else if (code == Code.Ldfld || code == Code.Ldflda || code == Code.Ldobj || code.ToString().StartsWith("Ldind", StringComparison.Ordinal))
-                        state.Stack.Add(state.Read(state.Pop()));
+                        state.Stack.Add(code == Code.Ldflda ? state.Pop() : state.Content(state.Pop()));
                     else if (code.ToString().StartsWith("Ldelem", StringComparison.Ordinal))
-                    { state.Pop(); state.Stack.Add(state.Read(state.Pop())); }
+                    { state.Pop(); var address = state.Pop(); state.Stack.Add(code == Code.Ldelema ? address : state.Content(address)); }
                     else if (code == Code.Ldsfld || code == Code.Ldsflda)
                         state.Stack.Add(new Value { External = true });
                     else if (code == Code.Ret)
@@ -438,36 +457,58 @@ namespace HybridCLR.Editor.AssemblyShadow
                         if (code == Code.Newobj) values[0] = Value.Root(index + 1);
                         var actual = Resolve(target); bool selected = Providers(new Call { Reference = target, Target = actual, Code = code }).Any();
                         bool tainted = values.Any(value => value.Selected); var returned = new Value();
+                        var returnType = CloseCallType(target, target.MethodSig.RetType);
+                        bool mutableInputs = values.Select((value, argument) => value.Roots.Count > 0 && MutableHandleContainer(CallParameterType(target, argument))).Any(value => value);
+                        bool mutableReturn = code != Code.Newobj && MutableHandleContainer(returnType);
+                        bool relevant = tainted || mutableInputs || mutableReturn;
+                        bool captured = actual != null && calls.ContainsKey(actual);
                         if (tainted && code != Code.Newobj && DelegateType(target.DeclaringType.ToTypeSig()))
                             Error("RawSelectorCallbackExposure", method, "Selected handles are published through a callback at operation " + index + ".");
-                        if (tainted && code == Code.Callvirt && actual != null && calls.ContainsKey(actual) && actual.IsVirtual && !actual.IsFinal && !actual.DeclaringType.IsSealed)
+                        if (relevant && code == Code.Callvirt && captured && actual.IsVirtual && !actual.IsFinal && !actual.DeclaringType.IsSealed)
                             Error("RawSelectorUnprovedOutputCall", method, "Selected-value effects through overridable dispatch are unsupported at operation " + index + ".");
-                        if (tainted && actual != null && calls.ContainsKey(actual) && HasOutputEffects(actual))
+                        if (relevant && captured && (mutableReturn || HasOutputEffects(actual)))
                         {
                             var nested = AnalyzeEffects(actual, values, new HashSet<MethodDef>(active));
-                            returned.Selected = nested.Returned.Selected; returned.External = nested.Returned.External;
-                            foreach (int root in nested.Returned.Roots)
-                                if (root < 0) returned.Merge(values[-root - 1]); else returned.Roots.Add(index + 1);
-                            foreach (int argument in nested.WrittenArguments) StoreSelected(method, index, state, values[argument], new Value { Selected = true }, effects, "RawSelectorOutputExposure");
+                            ImportReachableHeap(state, nested, values, index + 1);
+                            returned = MapEffect(nested.Returned, values, index + 1);
+                            returned.External |= nested.Returned.Roots.Any(nested.PublishedRoots.Contains);
+                            foreach (var pair in nested.ArgumentContents)
+                                StoreSelected(method, index, state, values[pair.Key], MapEffect(pair.Value, values, index + 1), effects, "RawSelectorOutputExposure");
+                            foreach (int argument in nested.PublishedArguments) Publish(state, values[argument], effects);
+                            // Inputs may be related through the caller's heap even
+                            // when the callee sees distinct parameters. Recheck
+                            // writes after publication reaches those caller aliases.
+                            foreach (var pair in nested.ArgumentContents)
+                            {
+                                var destination = state.Read(values[pair.Key]); var written = state.Read(MapEffect(pair.Value, values, index + 1));
+                                if (written.Selected && (destination.External || destination.Roots.Count == 0))
+                                    Error("RawSelectorOutputExposure", method, "A callee publishes and writes selected values through related input roots at operation " + index + ".");
+                            }
                         }
-                        else if (tainted && (actual == null || !calls.ContainsKey(actual)))
+                        else if (relevant && !captured)
                         {
-                            // Opaque Type diagnostics are not output selectors.
-                            // A selected value plus a caller-owned mutable sink,
-                            // however, needs an actual body/effect proof.
+                            // No body means no proof of non-capture, even while
+                            // the mutable input is still empty. Reference-domain
+                            // opaque selected inputs remain read-only plumbing;
+                            // an unselected mutable sink is not such an input.
+                            AssemblyDescriptor targetDescriptor;
+                            bool runtimeTarget = target.DeclaringType.DefinitionAssembly != null && set.Assemblies.TryGetValue(Canonical(target.DeclaringType.DefinitionAssembly.Name.String), out targetDescriptor) && Runtime(targetDescriptor);
                             for (int argument = 0; argument < values.Length; argument++)
                             {
                                 var signature = CallParameterType(target, argument);
-                                if (MutableHandleContainer(signature)) StoreSelected(method, index, state, values[argument], new Value { Selected = true }, effects, "RawSelectorUnprovedOutputCall");
+                                if (!MutableHandleContainer(signature)) continue;
+                                if (tainted && (!values[argument].Selected || runtimeTarget))
+                                    StoreSelected(method, index, state, values[argument], new Value { Selected = true }, effects, "RawSelectorUnprovedOutputCall");
+                                Publish(state, values[argument], effects);
                             }
+                            if (mutableReturn) returned.External = true;
                         }
                         if (code == Code.Newobj || target.MethodSig.RetType.ElementType != ElementType.Void)
                         {
-                            var value = code == Code.Newobj ? values[0].Copy() : returned.Copy();
-                            var returnType = CloseCallType(target, target.MethodSig.RetType);
+                            var value = code == Code.Newobj ? state.Read(values[0]) : returned.Copy();
                             // Without a return-alias proof, a mutable result may
                             // still be a caller-owned input, not a fresh object.
-                            if (code != Code.Newobj && MutableHandleContainer(returnType))
+                            if (code != Code.Newobj && mutableReturn && !captured)
                                 for (int argument = 0; argument < values.Length; argument++)
                                     if (MutableHandleContainer(CallParameterType(target, argument))) value.Merge(values[argument]);
                             if (code != Code.Newobj && value.Roots.Count == 0) value.Roots.Add(index + 1);
@@ -494,18 +535,53 @@ namespace HybridCLR.Editor.AssemblyShadow
                     if (instruction.OpCode.FlowControl != FlowControl.Branch && instruction.OpCode.FlowControl != FlowControl.Return && instruction.OpCode.FlowControl != FlowControl.Throw)
                         enter(index + 1, state);
                 }
+                foreach (var state in states.Where(state => state != null))
+                    foreach (var pair in state.Heap)
+                    { Value content; if (!effects.Heap.TryGetValue(pair.Key, out content)) effects.Heap[pair.Key] = pair.Value.Copy(); else content.Merge(pair.Value); }
+                effects.Returned.External |= effects.Returned.Roots.Any(effects.PublishedRoots.Contains);
                 active.Remove(method); return effects;
             }
             private void StoreSelected(MethodDef method, int index, Flow state, Value address, Value value, Effects effects, string code)
             {
+                address = state.Read(address); value = state.Read(value);
                 if (value.Selected)
                 {
                     if (address.External || address.Roots.Count == 0) Error(code, method, "Selected handles escape through caller-owned/global/unknown storage at operation " + index + ".");
-                    foreach (int root in address.Roots.Where(root => root < 0)) effects.WrittenArguments.Add(-root - 1);
                 }
-                if (address.External)
-                    foreach (int root in value.Roots) state.Write(Value.Root(root), new Value { External = true });
+                foreach (int root in address.Roots.Where(root => root < 0))
+                { Value content; if (!effects.ArgumentContents.TryGetValue(-root - 1, out content)) effects.ArgumentContents[-root - 1] = value.Copy(); else content.Merge(value); }
+                if (address.External || address.Roots.Count == 0) Publish(state, value, effects);
                 state.Write(address, value);
+            }
+            private static Value MapEffect(Value value, Value[] arguments, int allocation)
+            {
+                var result = new Value { Selected = value.Selected, External = value.External };
+                foreach (int root in value.Roots) if (root < 0) result.Merge(arguments[-root - 1]); else result.Roots.Add(allocation);
+                return result;
+            }
+            private static void ImportReachableHeap(Flow state, Effects effects, Value[] arguments, int allocation)
+            {
+                var pending = new Queue<int>(effects.Returned.Roots.Concat(effects.ArgumentContents.Values.SelectMany(value => value.Roots)));
+                var visited = new HashSet<int>();
+                while (pending.Count > 0)
+                {
+                    int root = pending.Dequeue(); Value content;
+                    if (root < 0 || !visited.Add(root) || !effects.Heap.TryGetValue(root, out content)) continue;
+                    state.Write(Value.Root(allocation), MapEffect(content, arguments, allocation));
+                    foreach (int child in content.Roots) pending.Enqueue(child);
+                    if (effects.PublishedRoots.Contains(root)) state.Published.Add(allocation);
+                }
+            }
+            private static void Publish(Flow state, Value value, Effects effects)
+            {
+                var pending = new Queue<int>(value.Roots); var visited = new HashSet<int>();
+                while (pending.Count > 0)
+                {
+                    int root = pending.Dequeue(); if (!visited.Add(root)) continue;
+                    state.Published.Add(root); effects.PublishedRoots.Add(root);
+                    if (root < 0) effects.PublishedArguments.Add(-root - 1);
+                    Value content; if (state.Heap.TryGetValue(root, out content)) foreach (int child in content.Roots) pending.Enqueue(child);
+                }
             }
             private static TypeSig CallParameterType(IMethod target, int index)
             { return target.MethodSig.HasThis && index == 0 ? target.DeclaringType.ToTypeSig() : CloseCallType(target, target.MethodSig.Params[index - (target.MethodSig.HasThis ? 1 : 0)]); }

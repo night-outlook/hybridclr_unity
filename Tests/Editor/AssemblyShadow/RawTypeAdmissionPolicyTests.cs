@@ -187,6 +187,38 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
         }
 
+        [Test] public void PublishingAnEmptyContainerThroughAHelperMustSurviveUntilLaterSelection()
+        {
+            using (var fixture = new Fixture(brokerAccess: "publication-helper-before"))
+            {
+                CollectionAssert.AreEquivalent(new[] { "mscorlib" }, fixture.Set.Get("Outside").references);
+                CollectionAssert.AreEquivalent(new[] { "mscorlib", "outside" }, fixture.Set.Get("Consumer").references);
+                CollectionAssert.AreEqual(new[] { "Candidate" }, new AssemblyReferenceGraph(fixture.Set.Assemblies.Values, fixture.Policy.dependencies).ReverseClosure(new[] { "Candidate" }));
+                Assert.IsFalse(fixture.Validate(fixture.Configuration).IsValid,
+                    "Publishing an empty fresh array must not hide the later Candidate Type[] write from an outside reader with no Bootstrap reference.");
+            }
+        }
+
+        [Test] public void PublicationEffectsCrossReceiversReturnsNestedAliasesAndHelperChains()
+        {
+            foreach (string shape in new[] { "same-before", "helper-after", "multi-before", "multi-after", "return-before", "returned-global", "returned-wrapper", "receiver-before", "constructor-before", "nested-before", "related-arguments", "unknown-before", "unknown-return" })
+            using (var fixture = new Fixture(brokerAccess: "publication-" + shape))
+            {
+                CollectionAssert.AreEquivalent(new[] { "mscorlib" }, fixture.Set.Get("Outside").references, shape);
+                CollectionAssert.AreEqual(new[] { "Candidate" }, new AssemblyReferenceGraph(fixture.Set.Assemblies.Values, fixture.Policy.dependencies).ReverseClosure(new[] { "Candidate" }), shape);
+                var result = fixture.Validate(fixture.Configuration);
+                Assert.IsFalse(result.IsValid, shape + " loses publication across a physical helper/alias boundary.");
+                Assert.IsFalse(result.ToString().Contains("InvalidRawSelectorPropagation"), shape + " must be rejected for actual output exposure, not a broken analyzer: " + result);
+            }
+        }
+
+        [Test] public void ProvenReadOnlyCallsAndPrivateAliasMaterializationDoNotPublishRoots()
+        {
+            foreach (string shape in new[] { "readonly-before", "readonly-return", "readonly-constructor", "local-link" })
+            using (var fixture = new Fixture(brokerAccess: "publication-" + shape))
+                Assert.IsTrue(fixture.Validate(fixture.Configuration).IsValid, shape + ": " + fixture.Validate(fixture.Configuration));
+        }
+
         [Test] public void FreshLocalMaterializationAndReadOnlyMutableInputsRemainAllowed()
         {
             using (var fixture = new Fixture(customizeConsumer: module => Fixture.AddLocalOutputPlumbing(module)))
@@ -326,6 +358,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                     if (interfaceBridge) AddInterfaceBroker(consumer, host);
                     if (brokerAccess != null && brokerAccess.StartsWith("output-", StringComparison.Ordinal)) AddOutputBroker(consumer, brokerAccess.Substring(7));
                     if (brokerAccess == "custom-callback") AddCallbackBroker(consumer);
+                    if (brokerAccess != null && brokerAccess.StartsWith("publication-", StringComparison.Ordinal)) AddPublicationFlow(consumer, brokerAccess.Substring(12));
                     if (customizeConsumer != null) customizeConsumer(consumer);
                     consumer.Write(Path.Combine(assemblies, "Consumer.dll"));
                 }
@@ -437,7 +470,15 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 var method = new MethodDefUser("SelectCandidateTypes", MethodSig.CreateStatic(importer.Import(typeof(Type[])).ToTypeSig()),
                     dnlib.DotNet.MethodImplAttributes.IL, dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static) { Body = new CilBody() }; host.Methods.Add(method);
                 var il = method.Body.Instructions;
-                if (access == "custom-callback")
+                if (access.StartsWith("publication-", StringComparison.Ordinal))
+                {
+                    var published = new FieldDefUser("Published", new FieldSig(new SZArraySig(outside.CorLibTypes.Object)), dnlib.DotNet.FieldAttributes.Public | dnlib.DotNet.FieldAttributes.Static); host.Fields.Add(published);
+                    il.Add(Instruction.Create(OpCodes.Ldsfld, published)); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref));
+                    if (access == "publication-nested-before" || access == "publication-returned-wrapper" || access == "publication-related-arguments")
+                    { il.Add(Instruction.Create(OpCodes.Castclass, published.FieldSig.Type.ToTypeDefOrRef())); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Ldelem_Ref)); }
+                    il.Add(Instruction.Create(OpCodes.Castclass, importer.Import(typeof(Type[]))));
+                }
+                else if (access == "custom-callback")
                 {
                     var callback = new TypeDefUser("Fixture", "SelectedCallback", importer.Import(typeof(MulticastDelegate))) { Attributes = dnlib.DotNet.TypeAttributes.Public | dnlib.DotNet.TypeAttributes.Sealed }; outside.Types.Add(callback);
                     var ctor = new MethodDefUser(".ctor", MethodSig.CreateInstance(outside.CorLibTypes.Void, outside.CorLibTypes.Object, outside.CorLibTypes.IntPtr), dnlib.DotNet.MethodImplAttributes.Runtime,
@@ -578,6 +619,94 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                     if (shape == "byref") il.Add(Instruction.Create(OpCodes.Ldelema, module.CorLibTypes.Object.TypeDefOrRef));
                     il.Add(Instruction.Create(OpCodes.Call, original)); il.Add(Instruction.Create(shape == "byref" ? OpCodes.Stind_Ref : OpCodes.Stelem_Ref));
                 }
+                il.Add(Instruction.Create(OpCodes.Ret));
+            }
+            private static void AddPublicationFlow(ModuleDefUser module, string shape)
+            {
+                var host = module.Types.Single(type => type.Name == "Host"); var array = new SZArraySig(module.CorLibTypes.Object);
+                var published = new MemberRefUser(module, "Published", new FieldSig(array), new TypeRefUser(module, "Fixture", "OutsideHost", new AssemblyRefUser("Outside", new Version(1, 0, 0, 0))));
+                var publish = Method(host, "Publish", MethodSig.CreateStatic(module.CorLibTypes.Void, array));
+                publish.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); publish.Body.Instructions.Add(Instruction.Create(OpCodes.Stsfld, published)); publish.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                IMethod selectedPublisher = publish;
+                if (shape.StartsWith("multi-", StringComparison.Ordinal) || shape == "return-before")
+                {
+                    var forward = Method(host, "ForwardPublish", MethodSig.CreateStatic(shape == "return-before" ? (TypeSig)array : module.CorLibTypes.Void, array));
+                    forward.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); forward.Body.Instructions.Add(Instruction.Create(OpCodes.Call, publish));
+                    if (shape == "return-before") forward.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); forward.Body.Instructions.Add(Instruction.Create(OpCodes.Ret)); selectedPublisher = forward;
+                }
+                if (shape == "readonly-before" || shape == "readonly-return")
+                {
+                    var read = Method(host, "ReadOnly", MethodSig.CreateStatic(shape == "readonly-return" ? (TypeSig)array : module.CorLibTypes.Void, array));
+                    read.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
+                    if (shape == "readonly-before") { read.Body.Instructions.Add(Instruction.Create(OpCodes.Ldlen)); read.Body.Instructions.Add(Instruction.Create(OpCodes.Pop)); }
+                    read.Body.Instructions.Add(Instruction.Create(OpCodes.Ret)); selectedPublisher = read;
+                }
+                if (shape == "unknown-before" || shape == "unknown-return")
+                {
+                    var unknown = new MethodDefUser("UnknownPublish", shape == "unknown-return" ? MethodSig.CreateStatic(array) : MethodSig.CreateStatic(module.CorLibTypes.Void, array), dnlib.DotNet.MethodImplAttributes.Native | dnlib.DotNet.MethodImplAttributes.Unmanaged,
+                        dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static | dnlib.DotNet.MethodAttributes.PinvokeImpl);
+                    unknown.ImplMap = new ImplMapUser(new ModuleRefUser(module, "UnprovenNativePublisher"), "Publish", PInvokeAttributes.CallConvCdecl); host.Methods.Add(unknown); selectedPublisher = unknown;
+                }
+                var entry = Method(host, "BeginProbe", MethodSig.CreateStatic(module.CorLibTypes.Void)); var local = new Local(array); entry.Body.Variables.Add(local); var il = entry.Body.Instructions;
+                il.Add(Instruction.Create(OpCodes.Ldc_I4_1)); il.Add(Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef)); il.Add(Instruction.Create(OpCodes.Stloc, local));
+                Action write = () => { il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Ldc_I4_0)); il.Add(Instruction.Create(OpCodes.Call, host.Methods.Single(value => value.Name == "Run"))); il.Add(Instruction.Create(OpCodes.Stelem_Ref)); };
+                if (shape.EndsWith("-after", StringComparison.Ordinal)) write();
+                if (shape == "same-before") { il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Stsfld, published)); }
+                else if (shape == "nested-before" || shape == "local-link" || shape == "returned-wrapper" || shape == "related-arguments")
+                {
+                    var outer = new Local(array); entry.Body.Variables.Add(outer);
+                    if (shape == "returned-wrapper")
+                    {
+                        var wrap = Method(host, "WrapEmpty", MethodSig.CreateStatic(array, array));
+                        wrap.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1)); wrap.Body.Instructions.Add(Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef)); wrap.Body.Instructions.Add(Instruction.Create(OpCodes.Dup)); wrap.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0)); wrap.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); wrap.Body.Instructions.Add(Instruction.Create(OpCodes.Stelem_Ref)); wrap.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                        il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Call, wrap)); il.Add(Instruction.Create(OpCodes.Stloc, outer));
+                    }
+                    else
+                    {
+                        il.Add(Instruction.Create(OpCodes.Ldc_I4_1)); il.Add(Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef)); il.Add(Instruction.Create(OpCodes.Stloc, outer));
+                        var link = Method(host, "LinkEmpty", MethodSig.CreateStatic(module.CorLibTypes.Void, array, array));
+                        link.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); link.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0)); link.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); link.Body.Instructions.Add(Instruction.Create(OpCodes.Stelem_Ref)); link.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                        il.Add(Instruction.Create(OpCodes.Ldloc, outer)); il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Call, link));
+                    }
+                    if (shape == "related-arguments")
+                    {
+                        var twoPhase = Method(host, "PublishThenWrite", MethodSig.CreateStatic(module.CorLibTypes.Void, array, array, new Importer(module).Import(typeof(Type[])).ToTypeSig()));
+                        twoPhase.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); twoPhase.Body.Instructions.Add(Instruction.Create(OpCodes.Call, publish));
+                        twoPhase.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); twoPhase.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0)); twoPhase.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_2)); twoPhase.Body.Instructions.Add(Instruction.Create(OpCodes.Stelem_Ref)); twoPhase.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                        il.Add(Instruction.Create(OpCodes.Ldloc, outer)); il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Call, host.Methods.Single(value => value.Name == "Run"))); il.Add(Instruction.Create(OpCodes.Call, twoPhase));
+                    }
+                    else if (shape != "local-link") { il.Add(Instruction.Create(OpCodes.Ldloc, outer)); il.Add(Instruction.Create(OpCodes.Call, publish)); }
+                }
+                else if (shape == "returned-global")
+                {
+                    var factory = Method(host, "MakePublished", MethodSig.CreateStatic(array));
+                    factory.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_1)); factory.Body.Instructions.Add(Instruction.Create(OpCodes.Newarr, module.CorLibTypes.Object.TypeDefOrRef)); factory.Body.Instructions.Add(Instruction.Create(OpCodes.Dup)); factory.Body.Instructions.Add(Instruction.Create(OpCodes.Call, publish)); factory.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                    il.Add(Instruction.Create(OpCodes.Call, factory)); il.Add(Instruction.Create(OpCodes.Stloc, local));
+                }
+                else if (shape == "receiver-before" || shape == "constructor-before" || shape == "readonly-constructor")
+                {
+                    var owner = new TypeDefUser("Fixture", "Publisher", module.CorLibTypes.Object.TypeDefOrRef) { Attributes = dnlib.DotNet.TypeAttributes.Public | dnlib.DotNet.TypeAttributes.Sealed }; module.Types.Add(owner);
+                    bool receivesArray = shape != "receiver-before";
+                    var ctor = new MethodDefUser(".ctor", receivesArray ? MethodSig.CreateInstance(module.CorLibTypes.Void, array) : MethodSig.CreateInstance(module.CorLibTypes.Void), dnlib.DotNet.MethodImplAttributes.IL,
+                        dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.SpecialName | dnlib.DotNet.MethodAttributes.RTSpecialName) { Body = new CilBody() }; owner.Methods.Add(ctor);
+                    ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, new Importer(module).Import(typeof(object).GetConstructor(Type.EmptyTypes))));
+                    if (shape == "constructor-before") { ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, publish)); }
+                    ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                    if (receivesArray) il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Newobj, ctor));
+                    if (shape == "receiver-before")
+                    {
+                        var share = Method(owner, "Share", MethodSig.CreateInstance(module.CorLibTypes.Void, array), true);
+                        share.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_1)); share.Body.Instructions.Add(Instruction.Create(OpCodes.Call, publish)); share.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                        il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Callvirt, share));
+                    }
+                    else il.Add(Instruction.Create(OpCodes.Pop));
+                }
+                else
+                {
+                    if (selectedPublisher.MethodSig.Params.Count != 0) il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Call, selectedPublisher));
+                    if (selectedPublisher.MethodSig.RetType.ElementType != ElementType.Void) il.Add(Instruction.Create(OpCodes.Stloc, local));
+                }
+                if (!shape.EndsWith("-after", StringComparison.Ordinal) && shape != "related-arguments") write();
                 il.Add(Instruction.Create(OpCodes.Ret));
             }
             private static void AddCallbackBroker(ModuleDefUser module)
