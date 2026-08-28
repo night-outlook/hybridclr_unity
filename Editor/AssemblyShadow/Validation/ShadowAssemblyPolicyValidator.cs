@@ -122,6 +122,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                     isBootstrap = capability != null && capability.isBootstrap,
                 });
             }
+            RawTypeAdmissionPropagation.Validate(set, policy, definitions, rawAdmissions, bindingErrors);
             HashSet<string> removedReferences = null;
             if (linkedRuntimeReferences != null)
             {

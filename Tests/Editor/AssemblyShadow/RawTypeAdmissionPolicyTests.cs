@@ -78,27 +78,183 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
         }
 
+        [Test] public void OutsideDirectBrokerCallRequiresCandidateDependency()
+        { AssertUntrackedBrokerRejected("direct"); }
+
+        [Test] public void SameBootstrapForwarderCannotHideCandidateDependency()
+        { AssertUntrackedBrokerRejected("same-bootstrap"); }
+
+        [Test] public void CrossBootstrapForwarderCannotHideCandidateDependency()
+        { AssertUntrackedBrokerRejected("cross-bootstrap"); }
+
+        [Test] public void LiteralReflectionOnBrokerRequiresCandidateNotMerelyBrokerDependency()
+        { AssertUntrackedBrokerRejected("reflection"); }
+
+        [Test] public void OutsideBrokerDelegateCannotHideCandidateDependency()
+        { AssertUntrackedBrokerRejected("delegate"); }
+
+        [Test] public void BrokerTypeTokenAndReflectiveInvocationCannotHideCandidateDependency()
+        { AssertUntrackedBrokerRejected("type-token"); }
+
+        [Test] public void GenericMethodSpecForwarderCannotHideCandidateDependency()
+        { AssertUntrackedBrokerRejected("generic"); }
+
+        [Test] public void TruthfulCandidateEdgesPutOutsideSelectorsIntoActualReverseClosure()
+        {
+            foreach (string access in new[] { "direct", "same-bootstrap", "cross-bootstrap", "generic" })
+            using (var fixture = new Fixture(brokerAccess: access, shadowOutside: true))
+            {
+                fixture.Policy.dependencies.runtimeDependencies = new[] { new DeclaredRuntimeDependency {
+                    consumer = "Outside", provider = "Candidate", kind = "admitted selector", evidence = "Outside selects Candidate through the exact Bootstrap broker." } };
+                Assert.IsTrue(fixture.Validate(fixture.Configuration).IsValid, fixture.Validate(fixture.Configuration).ToString());
+                var graph = new AssemblyReferenceGraph(fixture.Set.Assemblies.Values, fixture.Policy.dependencies);
+                CollectionAssert.AreEquivalent(new[] { "Candidate", "Outside" }, graph.ReverseClosure(new[] { "Candidate" }));
+                Assert.IsFalse(fixture.Set.Get("Outside").references.Contains("candidate"), "The explicit Candidate edge must not be fabricated as an AssemblyRef.");
+            }
+        }
+
+        [Test] public void TruthfulNonShadowSelectorIsCaughtByReverseClosure()
+        {
+            using (var fixture = new Fixture(brokerAccess: "direct"))
+            {
+                fixture.Policy.dependencies.runtimeDependencies = new[] { new DeclaredRuntimeDependency {
+                    consumer = "Outside", provider = "Candidate", kind = "admitted selector", evidence = "Actual finite provider selection." } };
+                Assert.IsTrue(fixture.Validate(fixture.Configuration).IsValid, fixture.Validate(fixture.Configuration).ToString());
+                var graph = new AssemblyReferenceGraph(fixture.Set.Assemblies.Values, fixture.Policy.dependencies);
+                StringAssert.Contains("NonShadowConsumer", Assert.Throws<ShadowBuildException>(() => graph.ReverseClosure(new[] { "Candidate" })).Message);
+            }
+        }
+
+        [Test] public void WrapperLambdaExportIsRejectedWithoutAnOutsideBootstrapReference()
+        {
+            using (var fixture = new Fixture(customizeConsumer: module =>
+            {
+                var host = module.Types.Single(type => type.Name == "Host"); var original = host.Methods.Single(method => method.Name == "Run");
+                Fixture.AddForwarder(module, host, "<Factory>b__0", original);
+                var importer = new Importer(module); var factory = Fixture.Method(host, "Factory", MethodSig.CreateStatic(importer.Import(typeof(Func<Type[]>)).ToTypeSig()));
+                factory.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull));
+                factory.Body.Instructions.Add(Instruction.Create(OpCodes.Ldftn, host.Methods.Single(method => method.Name == "<Factory>b__0")));
+                factory.Body.Instructions.Add(Instruction.Create(OpCodes.Newobj, importer.Import(typeof(Func<Type[]>).GetConstructor(new[] { typeof(object), typeof(IntPtr) }))));
+                factory.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            }))
+                StringAssert.Contains("RawSelectorDelegateExposure", fixture.Validate(fixture.Configuration).ToString());
+        }
+
+        [Test] public void OutsideInterfaceDispatchCannotSelectThroughAStoredBootstrapImplementation()
+        {
+            using (var fixture = new Fixture(interfaceBridge: true))
+            {
+                CollectionAssert.AreEquivalent(new[] { "mscorlib" }, fixture.Set.Get("Bridge").references);
+                CollectionAssert.AreEquivalent(new[] { "mscorlib", "bridge" }, fixture.Set.Get("Consumer").references);
+                var graph = new AssemblyReferenceGraph(fixture.Set.Assemblies.Values, fixture.Policy.dependencies);
+                CollectionAssert.AreEqual(new[] { "Candidate" }, graph.ReverseClosure(new[] { "Candidate" }));
+                var result = fixture.Validate(fixture.Configuration);
+                StringAssert.Contains("RawSelectorVirtualExposure", result.ToString());
+                StringAssert.Contains("RawSelectorDependencyMissing", result.ToString());
+            }
+        }
+
+        [Test] public void AlreadySelectedTypePlumbingLinqCacheAndBooleanIteratorRemainAllowed()
+        {
+            using (var fixture = new Fixture(customizeConsumer: module => Fixture.AddOpaquePlumbing(module)))
+                Assert.IsTrue(fixture.Validate(fixture.Configuration).IsValid, fixture.Validate(fixture.Configuration).ToString());
+        }
+
+        [Test] public void ActualSelectedHandleFieldStorageIsRejected()
+        {
+            using (var fixture = new Fixture(customizeConsumer: module =>
+            {
+                var host = module.Types.Single(type => type.Name == "Host");
+                var field = new FieldDefUser("Selected", new FieldSig(new Importer(module).Import(typeof(Type[])).ToTypeSig()), dnlib.DotNet.FieldAttributes.Public | dnlib.DotNet.FieldAttributes.Static); host.Fields.Add(field);
+                var method = Fixture.Method(host, "Store", MethodSig.CreateStatic(module.CorLibTypes.Void));
+                method.Body.Instructions.Add(Instruction.Create(OpCodes.Call, host.Methods.Single(value => value.Name == "Run")));
+                method.Body.Instructions.Add(Instruction.Create(OpCodes.Stsfld, field)); method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            })) StringAssert.Contains("RawSelectorFieldExposure", fixture.Validate(fixture.Configuration).ToString());
+        }
+
+        private static void AssertUntrackedBrokerRejected(string access)
+        {
+            using (var fixture = new Fixture(brokerAccess: access))
+            {
+                // Every descriptor and AssemblyRef comes from emitted DLL bytes.
+                // The reflective case truthfully declares Outside -> Consumer,
+                // but deliberately has no Outside -> Candidate declaration.
+                string target = access == "cross-bootstrap" ? "forwarder" : "consumer";
+                string[] expectedReferences = access == "reflection" ? new[] { "mscorlib" } : new[] { "mscorlib", target };
+                CollectionAssert.AreEquivalent(expectedReferences, fixture.Set.Get("Outside").references);
+                CollectionAssert.AreEquivalent(new[] { "mscorlib" }, fixture.Set.Get("Consumer").references);
+                if (access == "cross-bootstrap")
+                    CollectionAssert.AreEquivalent(new[] { "mscorlib", "consumer" }, fixture.Set.Get("Forwarder").references);
+
+                var graph = new AssemblyReferenceGraph(fixture.Set.Assemblies.Values, fixture.Policy.dependencies);
+                Assert.IsTrue(graph.Edges.Any(edge => edge.consumer == "Outside" && edge.provider.Equals(target, StringComparison.OrdinalIgnoreCase)));
+                if (access == "cross-bootstrap")
+                    Assert.IsTrue(graph.Edges.Any(edge => edge.consumer == "Forwarder" && edge.provider == "Consumer"));
+                Assert.IsFalse(graph.Edges.Any(edge => edge.provider == "Candidate"));
+                CollectionAssert.AreEqual(new[] { "Candidate" }, graph.ReverseClosure(new[] { "Candidate" }),
+                    "The declared graph cannot include this outside provider-selector until its Candidate dependency is represented.");
+
+                var result = fixture.Validate(fixture.Configuration);
+                Assert.IsFalse(result.IsValid, access + ": admitted Bootstrap provider selection must not be accepted while the graph only contains " +
+                    string.Join(", ", graph.Edges.Select(edge => edge.consumer + " -> " + edge.provider)) + ". Actual policy: " + result);
+            }
+        }
+
         private sealed class Fixture : IDisposable
         {
             private readonly string root = Path.Combine(Path.GetTempPath(), "RawTypeAdmissionPolicy-" + Guid.NewGuid().ToString("N"));
             internal CompiledAssemblySet Set;
             internal readonly ShadowPolicyConfiguration Policy = new ShadowPolicyConfiguration();
             internal RawTypeAdmissionConfiguration Configuration;
-            internal Fixture(bool extra = false)
+            internal Fixture(bool extra = false, string brokerAccess = null, bool shadowOutside = false,
+                Action<ModuleDefUser> customizeConsumer = null, bool interfaceBridge = false)
             {
                 string assemblies = Path.Combine(root, "Assemblies"), references = Path.Combine(root, "References");
                 Directory.CreateDirectory(assemblies); Directory.CreateDirectory(references);
                 File.Copy(typeof(object).Assembly.Location, Path.Combine(references, "mscorlib.dll"));
                 using (var provider = Module("Candidate"))
                 { provider.Types.Add(new TypeDefUser("Fixture", "Payload", provider.CorLibTypes.Object.TypeDefOrRef)); provider.Write(Path.Combine(assemblies, "Candidate.dll")); }
+                if (interfaceBridge) using (var bridge = Module("Bridge")) { AddInterfaceBridge(bridge); bridge.Write(Path.Combine(assemblies, "Bridge.dll")); }
                 using (var consumer = Module("Consumer"))
                 {
-                    var host = new TypeDefUser("Fixture", "Host", consumer.CorLibTypes.Object.TypeDefOrRef); consumer.Types.Add(host);
+                    var host = new TypeDefUser("Fixture", "Host", consumer.CorLibTypes.Object.TypeDefOrRef) { Attributes = dnlib.DotNet.TypeAttributes.Public }; consumer.Types.Add(host);
                     AddMethod(consumer, host, "Run", false); if (extra) AddMethod(consumer, host, "Other", true);
+                    if (brokerAccess == "same-bootstrap" || brokerAccess == "generic")
+                    {
+                        AddForwarder(consumer, host, "Forward", host.Methods.Single(value => value.Name == "Run"));
+                        if (brokerAccess == "generic")
+                        {
+                            var generic = host.Methods.Single(value => value.Name == "Forward");
+                            generic.MethodSig.CallingConvention |= CallingConvention.Generic; generic.MethodSig.GenParamCount = 1;
+                            generic.GenericParameters.Add(new GenericParamUser(0, GenericParamAttributes.NonVariant, "T"));
+                        }
+                    }
+                    if (interfaceBridge) AddInterfaceBroker(consumer, host);
+                    if (customizeConsumer != null) customizeConsumer(consumer);
                     consumer.Write(Path.Combine(assemblies, "Consumer.dll"));
                 }
-                Set = DnlibAssemblyLoader.Load(assemblies, new[] { references }, new[] {
-                    new AssemblyCapability { name = "Consumer", isBootstrap = true }, new AssemblyCapability { name = "Candidate", isShadowCapable = true } });
+                if (brokerAccess == "cross-bootstrap")
+                    using (var forwarder = Module("Forwarder"))
+                    {
+                        var host = new TypeDefUser("Fixture", "ForwarderHost", forwarder.CorLibTypes.Object.TypeDefOrRef) { Attributes = dnlib.DotNet.TypeAttributes.Public }; forwarder.Types.Add(host);
+                        AddForwarder(forwarder, host, "Forward", BrokerMethod(forwarder, "Consumer", "Host", "Run"));
+                        forwarder.Write(Path.Combine(assemblies, "Forwarder.dll"));
+                    }
+                if (brokerAccess != null)
+                    using (var outside = Module("Outside"))
+                    {
+                        AddOutsideBrokerAccess(outside, brokerAccess);
+                        outside.Write(Path.Combine(assemblies, "Outside.dll"));
+                    }
+                var capabilities = new System.Collections.Generic.List<AssemblyCapability> {
+                    new AssemblyCapability { name = "Consumer", isBootstrap = true }, new AssemblyCapability { name = "Candidate", isShadowCapable = true } };
+                if (brokerAccess != null) capabilities.Add(new AssemblyCapability { name = "Outside", isShadowCapable = shadowOutside });
+                if (brokerAccess == "cross-bootstrap") capabilities.Add(new AssemblyCapability { name = "Forwarder", isBootstrap = true });
+                if (interfaceBridge) capabilities.Add(new AssemblyCapability { name = "Bridge" });
+                Set = DnlibAssemblyLoader.Load(assemblies, new[] { references }, capabilities);
+                if (brokerAccess == "reflection")
+                    Policy.dependencies.runtimeDependencies = new[] { new DeclaredRuntimeDependency {
+                        consumer = "Outside", provider = "Consumer", kind = "literal broker reflection", evidence = "Fixture.Host is literally acquired from Consumer; no Candidate dependency has been declared." } };
                 var method = Set.GetModule("Consumer").GetTypes().SelectMany(type => type.Methods).Single(value => value.Name == "Run");
                 Configuration = new RawTypeAdmissionConfiguration { sites = new[] { new RawTypeAdmissionSite
                 { id = "raw", consumerAssembly = "Consumer", declaringType = "Fixture.Host", methodSignature = method.FullName,
@@ -109,6 +265,117 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
             internal ShadowPolicyValidationResult Validate(RawTypeAdmissionConfiguration configuration)
             { return ShadowAssemblyPolicyValidator.ValidateCompiled(Set, Policy, DateTime.UtcNow, rawTypeAdmissionConfiguration: configuration); }
+            private static MemberRef BrokerMethod(ModuleDef module, string assembly, string type, string method)
+            {
+                return new MemberRefUser(module, method, MethodSig.CreateStatic(new Importer(module).Import(typeof(Type[])).ToTypeSig()),
+                    new TypeRefUser(module, "Fixture", type, new AssemblyRefUser(assembly, new Version(1, 0, 0, 0))));
+            }
+            internal static void AddForwarder(ModuleDef module, TypeDef host, string name, IMethod target)
+            {
+                var method = new MethodDefUser(name, MethodSig.CreateStatic(new Importer(module).Import(typeof(Type[])).ToTypeSig()),
+                    dnlib.DotNet.MethodImplAttributes.IL, dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static) { Body = new CilBody() }; host.Methods.Add(method);
+                method.Body.Instructions.Add(Instruction.Create(OpCodes.Call, target)); method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            }
+            internal static MethodDef Method(TypeDef host, string name, MethodSig signature, bool instance = false)
+            {
+                var method = new MethodDefUser(name, signature, dnlib.DotNet.MethodImplAttributes.IL,
+                    dnlib.DotNet.MethodAttributes.Public | (instance ? dnlib.DotNet.MethodAttributes.Virtual | dnlib.DotNet.MethodAttributes.NewSlot | dnlib.DotNet.MethodAttributes.Final : dnlib.DotNet.MethodAttributes.Static)) { Body = new CilBody() };
+                host.Methods.Add(method); return method;
+            }
+            private static void AddInterfaceBridge(ModuleDefUser module)
+            {
+                var importer = new Importer(module); var typeArray = importer.Import(typeof(Type[])).ToTypeSig();
+                var contract = new TypeDefUser("Fixture", "ITypeQuery") { Attributes = dnlib.DotNet.TypeAttributes.Public | dnlib.DotNet.TypeAttributes.Interface | dnlib.DotNet.TypeAttributes.Abstract }; module.Types.Add(contract);
+                var query = new MethodDefUser("Query", MethodSig.CreateInstance(typeArray, module.CorLibTypes.String), dnlib.DotNet.MethodImplAttributes.IL,
+                    dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Abstract | dnlib.DotNet.MethodAttributes.Virtual | dnlib.DotNet.MethodAttributes.NewSlot); contract.Methods.Add(query);
+                var host = new TypeDefUser("Fixture", "BridgeHost", module.CorLibTypes.Object.TypeDefOrRef) { Attributes = dnlib.DotNet.TypeAttributes.Public }; module.Types.Add(host);
+                var sink = new FieldDefUser("Sink", new FieldSig(new ClassSig(contract)), dnlib.DotNet.FieldAttributes.Public | dnlib.DotNet.FieldAttributes.Static); host.Fields.Add(sink);
+                var caller = Method(host, "Select", MethodSig.CreateStatic(typeArray)); var il = caller.Body.Instructions;
+                il.Add(Instruction.Create(OpCodes.Ldsfld, sink)); il.Add(Instruction.Create(OpCodes.Ldstr, "Candidate")); il.Add(Instruction.Create(OpCodes.Callvirt, query)); il.Add(Instruction.Create(OpCodes.Ret));
+            }
+            private static void AddInterfaceBroker(ModuleDefUser module, TypeDef host)
+            {
+                var importer = new Importer(module); var bridge = new AssemblyRefUser("Bridge", new Version(1, 0, 0, 0));
+                var contract = new TypeRefUser(module, "Fixture", "ITypeQuery", bridge);
+                var broker = new TypeDefUser("Fixture", "Broker", module.CorLibTypes.Object.TypeDefOrRef) { Attributes = dnlib.DotNet.TypeAttributes.Public | dnlib.DotNet.TypeAttributes.Sealed }; module.Types.Add(broker);
+                broker.Interfaces.Add(new InterfaceImplUser(contract));
+                var query = Method(broker, "Query", MethodSig.CreateInstance(importer.Import(typeof(Type[])).ToTypeSig(), module.CorLibTypes.String), true);
+                query.Body.Instructions.Add(Instruction.Create(OpCodes.Call, host.Methods.Single(value => value.Name == "Run"))); query.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var ctor = new MethodDefUser(".ctor", MethodSig.CreateInstance(module.CorLibTypes.Void), dnlib.DotNet.MethodImplAttributes.IL,
+                    dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.SpecialName | dnlib.DotNet.MethodAttributes.RTSpecialName) { Body = new CilBody() }; broker.Methods.Add(ctor);
+                ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Call, importer.Import(typeof(object).GetConstructor(Type.EmptyTypes)))); ctor.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var register = Method(host, "Register", MethodSig.CreateStatic(module.CorLibTypes.Void));
+                register.Body.Instructions.Add(Instruction.Create(OpCodes.Newobj, ctor));
+                register.Body.Instructions.Add(Instruction.Create(OpCodes.Stsfld, new MemberRefUser(module, "Sink", new FieldSig(new ClassSig(contract)), new TypeRefUser(module, "Fixture", "BridgeHost", bridge))));
+                register.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            }
+            internal static void AddOpaquePlumbing(ModuleDefUser module)
+            {
+                var importer = new Importer(module); var host = module.Types.Single(type => type.Name == "Host");
+                var converter = Method(host, "ConvertInfo", MethodSig.CreateStatic(importer.Import(typeof(Type)).ToTypeSig(), importer.Import(typeof(TypeInfo)).ToTypeSig()));
+                converter.Body.Instructions.Add(Instruction.Create(OpCodes.Ldarg_0)); converter.Body.Instructions.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(TypeInfo).GetMethod("AsType")))); converter.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var cache = new FieldDefUser("CachedConverter", new FieldSig(importer.Import(typeof(Func<TypeInfo, Type>)).ToTypeSig()), dnlib.DotNet.FieldAttributes.Static); host.Fields.Add(cache);
+                var observer = Method(host, "Observe", MethodSig.CreateStatic(module.CorLibTypes.Void)); var il = observer.Body.Instructions;
+                var local = new Local(importer.Import(typeof(Type[])).ToTypeSig()); observer.Body.Variables.Add(local);
+                il.Add(Instruction.Create(OpCodes.Call, host.Methods.Single(value => value.Name == "Run"))); il.Add(Instruction.Create(OpCodes.Stloc, local));
+                var ready = Instruction.Create(OpCodes.Nop); il.Add(Instruction.Create(OpCodes.Ldsfld, cache)); il.Add(Instruction.Create(OpCodes.Brtrue, ready));
+                il.Add(Instruction.Create(OpCodes.Ldnull)); il.Add(Instruction.Create(OpCodes.Ldftn, converter));
+                il.Add(Instruction.Create(OpCodes.Newobj, importer.Import(typeof(Func<TypeInfo, Type>).GetConstructor(new[] { typeof(object), typeof(IntPtr) })))); il.Add(Instruction.Create(OpCodes.Stsfld, cache)); il.Add(ready);
+                il.Add(Instruction.Create(OpCodes.Ldloc, local)); il.Add(Instruction.Create(OpCodes.Pop)); il.Add(Instruction.Create(OpCodes.Ret));
+                var iterator = new TypeDefUser("Fixture", "ProbeIterator", module.CorLibTypes.Object.TypeDefOrRef); module.Types.Add(iterator);
+                iterator.Interfaces.Add(new InterfaceImplUser(importer.Import(typeof(System.Collections.IEnumerator))));
+                var move = Method(iterator, "MoveNext", MethodSig.CreateInstance(module.CorLibTypes.Boolean), true);
+                move.Body.Instructions.Add(Instruction.Create(OpCodes.Call, observer)); move.Body.Instructions.Add(Instruction.Create(OpCodes.Ldc_I4_0)); move.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var current = Method(iterator, "get_Current", MethodSig.CreateInstance(module.CorLibTypes.Object), true); current.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull)); current.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var reset = Method(iterator, "Reset", MethodSig.CreateInstance(module.CorLibTypes.Void), true); reset.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var complete = Method(host, "Complete", MethodSig.CreateStatic(module.CorLibTypes.Void, module.CorLibTypes.Int32)); complete.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+                var completion = Method(host, "Completion", MethodSig.CreateStatic(importer.Import(typeof(Action<int>)).ToTypeSig()));
+                completion.Body.Instructions.Add(Instruction.Create(OpCodes.Ldnull)); completion.Body.Instructions.Add(Instruction.Create(OpCodes.Ldftn, complete));
+                completion.Body.Instructions.Add(Instruction.Create(OpCodes.Newobj, importer.Import(typeof(Action<int>).GetConstructor(new[] { typeof(object), typeof(IntPtr) })))); completion.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+            }
+            private static void AddOutsideBrokerAccess(ModuleDefUser outside, string access)
+            {
+                var importer = new Importer(outside);
+                var host = new TypeDefUser("Fixture", "OutsideHost", outside.CorLibTypes.Object.TypeDefOrRef) { Attributes = dnlib.DotNet.TypeAttributes.Public }; outside.Types.Add(host);
+                var method = new MethodDefUser("SelectCandidateTypes", MethodSig.CreateStatic(importer.Import(typeof(Type[])).ToTypeSig()),
+                    dnlib.DotNet.MethodImplAttributes.IL, dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static) { Body = new CilBody() }; host.Methods.Add(method);
+                var il = method.Body.Instructions;
+                if (access == "reflection" || access == "type-token")
+                {
+                    if (access == "reflection")
+                    {
+                        il.Add(Instruction.Create(OpCodes.Ldstr, "Fixture.Host, Consumer"));
+                        il.Add(Instruction.Create(OpCodes.Call, importer.Import(typeof(Type).GetMethod("GetType", new[] { typeof(string) }))));
+                    }
+                    else
+                    {
+                        il.Add(Instruction.Create(OpCodes.Ldtoken, BrokerMethod(outside, "Consumer", "Host", "Run").DeclaringType));
+                        il.Add(Instruction.Create(OpCodes.Call, importer.Import(typeof(Type).GetMethod("GetTypeFromHandle", new[] { typeof(RuntimeTypeHandle) }))));
+                    }
+                    il.Add(Instruction.Create(OpCodes.Ldstr, "Run"));
+                    il.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(Type).GetMethod("GetMethod", new[] { typeof(string) }))));
+                    il.Add(Instruction.Create(OpCodes.Ldnull)); il.Add(Instruction.Create(OpCodes.Ldnull));
+                    il.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(MethodBase).GetMethod("Invoke", new[] { typeof(object), typeof(object[]) }))));
+                    il.Add(Instruction.Create(OpCodes.Castclass, importer.Import(typeof(Type[]))));
+                }
+                else if (access == "delegate")
+                {
+                    il.Add(Instruction.Create(OpCodes.Ldnull)); il.Add(Instruction.Create(OpCodes.Ldftn, BrokerMethod(outside, "Consumer", "Host", "Run")));
+                    il.Add(Instruction.Create(OpCodes.Newobj, importer.Import(typeof(Func<Type[]>).GetConstructor(new[] { typeof(object), typeof(IntPtr) }))));
+                    il.Add(Instruction.Create(OpCodes.Callvirt, importer.Import(typeof(Func<Type[]>).GetMethod("Invoke"))));
+                }
+                else
+                {
+                    var target = BrokerMethod(outside, access == "cross-bootstrap" ? "Forwarder" : "Consumer", access == "cross-bootstrap" ? "ForwarderHost" : "Host", access == "direct" ? "Run" : "Forward");
+                    if (access == "generic")
+                    {
+                        target.MethodSig.CallingConvention |= CallingConvention.Generic; target.MethodSig.GenParamCount = 1;
+                        il.Add(Instruction.Create(OpCodes.Call, new MethodSpecUser(target, new GenericInstMethodSig(outside.CorLibTypes.Int32))));
+                    }
+                    else il.Add(Instruction.Create(OpCodes.Call, target));
+                }
+                il.Add(Instruction.Create(OpCodes.Ret));
+            }
             private static void AddMethod(ModuleDefUser module, TypeDef host, string name, bool indirect)
             {
                 var importer = new Importer(module); var method = new MethodDefUser(name, MethodSig.CreateStatic(importer.Import(typeof(Type[])).ToTypeSig()),
