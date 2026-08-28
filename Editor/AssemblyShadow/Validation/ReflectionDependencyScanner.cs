@@ -96,7 +96,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                     string callSite = type.FullName + "::" + method.Name;
                     string original;
                     if (method.Name == "MoveNext" && stateMachines.TryGetValue(type.FullName, out original)) callSite = original;
-                    State[] states = Analyze(method, fixedGuards);
+                    var freshNames = FindFreshAssemblyNames(method, modules);
+                    State[] states = Analyze(method, fixedGuards, freshNames, modules);
                     for (int index = 0; index < method.Body.Instructions.Count; ++index)
                     {
                         Instruction instruction = method.Body.Instructions[index];
@@ -143,10 +144,15 @@ namespace HybridCLR.Editor.AssemblyShadow
                         if (!IsReflectionCall(called, out kind, out argumentIndex)) continue;
                         State input = states[index];
                         Value argument = Argument(input, called, argumentIndex);
+                        string freshName;
+                        if (kind == "Assembly.Load" && input != null && !input.invalid && freshNames.TryGetValue(instruction, out freshName))
+                            argument = Value.String(freshName);
                         if (argument == null || argument.kind != "string" || string.IsNullOrWhiteSpace(argument.text))
                         { unknown.Add(callSite); acquisitions.Add(Acquisition(method, called, callSite, index, kind, true, null)); continue; }
                         string provider = null, typeName = null;
-                        if (kind == "Assembly.Load") provider = AssemblySimpleName(argument.text);
+                        if (kind == "Assembly.Load")
+                            provider = freshNames.ContainsKey(instruction) ? NameLoadProvider(argument.text) :
+                                StringNameLoadProvider(called, method.Module, modules, argument.text);
                         else
                         {
                             Value receiver = Receiver(input, called);
@@ -223,7 +229,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 kind == "Module.get_ModuleHandle" || kind == "Module.get_Assembly";
         }
 
-        private static State[] Analyze(MethodDef method, IDictionary<MethodDef, VerifiedReflectionBinding> fixedGuards)
+        private static State[] Analyze(MethodDef method, IDictionary<MethodDef, VerifiedReflectionBinding> fixedGuards,
+            IDictionary<Instruction, string> freshNames, IReadOnlyDictionary<string, ModuleDefMD> modules)
         {
             IList<Instruction> instructions = method.Body.Instructions;
             var indices = new Dictionary<Instruction, int>();
@@ -249,7 +256,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 int index = pending.Dequeue();
                 State output = inputs[index].Copy();
                 Instruction instruction = instructions[index];
-                Execute(instruction, output, fixedGuards);
+                Execute(instruction, output, fixedGuards, freshNames, method.Module, modules);
                 FlowControl flow = instruction.OpCode.FlowControl;
                 Instruction target = instruction.Operand as Instruction;
                 if (target != null && (flow == FlowControl.Branch || flow == FlowControl.Cond_Branch)) offer(indices[target], output);
@@ -260,7 +267,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             return inputs;
         }
 
-        private static void Execute(Instruction instruction, State state, IDictionary<MethodDef, VerifiedReflectionBinding> fixedGuards)
+        private static void Execute(Instruction instruction, State state, IDictionary<MethodDef, VerifiedReflectionBinding> fixedGuards,
+            IDictionary<Instruction, string> freshNames, ModuleDef module, IReadOnlyDictionary<string, ModuleDefMD> modules)
         {
             Code code = instruction.OpCode.Code;
             if (code == Code.Ldstr) { state.stack.Add(Value.String(instruction.Operand as string)); return; }
@@ -293,9 +301,14 @@ namespace HybridCLR.Editor.AssemblyShadow
                 Value value = null;
                 string owner = method.DeclaringType.FullName;
                 VerifiedReflectionBinding bound;
+                string freshName;
                 if (method is MethodDef && fixedGuards.TryGetValue((MethodDef)method, out bound)) value = Value.Assembly(bound.Providers.Single());
-                else if (owner == "System.Reflection.Assembly" && method.Name == "Load" && args.Length >= 1 && args[0] != null && args[0].kind == "string")
-                    value = Value.Assembly(AssemblySimpleName(args[0].text));
+                else if (freshNames.TryGetValue(instruction, out freshName)) value = Value.Assembly(NameLoadProvider(freshName));
+                else if (owner == "System.Reflection.Assembly" && method.Name == "Load" && args.Length > 0 && args[0] != null && args[0].kind == "string")
+                {
+                    string provider = StringNameLoadProvider(method, module, modules, args[0].text);
+                    if (provider != null && modules.ContainsKey(provider)) value = Value.Assembly(provider);
+                }
                 else if (owner == "System.Type" && method.Name == "GetTypeFromHandle" && args.Length == 1 && args[0] != null && args[0].kind == "type") value = args[0];
                 else if (owner == "System.Type" && method.Name == "get_Assembly" && receiver != null && receiver.kind == "type") value = Value.Assembly(receiver.assembly);
                 else if (owner == "System.String" && method.Name == "Concat" && args.Length >= 2 && args.All(arg => arg != null && arg.kind == "string"))
@@ -354,6 +367,129 @@ namespace HybridCLR.Editor.AssemblyShadow
             else if ((owner == "UnityEngine.GameObject" || owner == "UnityEngine.Component") && name == "GetComponent" && parameter >= 0) kind = "GetComponent";
             else if ((name == "Register" || name == "RegisterType" || name == "AddSingleton" || name == "AddTransient") && parameter >= 0) kind = "DI";
             return kind != null;
+        }
+
+        // AssemblyName is mutable. Never propagate it through the abstract
+        // interpreter: prove only this literal/constructor/call instruction
+        // sequence, with no alternate entry or alias-producing instruction.
+        private static Dictionary<Instruction, string> FindFreshAssemblyNames(MethodDef method,
+            IReadOnlyDictionary<string, ModuleDefMD> modules)
+        {
+            var result = new Dictionary<Instruction, string>();
+            IList<Instruction> il = method.Body.Instructions;
+            var entries = new HashSet<Instruction>();
+            foreach (Instruction instruction in il)
+            {
+                var target = instruction.Operand as Instruction;
+                if (target != null) entries.Add(target);
+                var targets = instruction.Operand as IList<Instruction>;
+                if (targets != null) foreach (Instruction item in targets) entries.Add(item);
+            }
+            foreach (ExceptionHandler handler in method.Body.ExceptionHandlers)
+            {
+                entries.Add(handler.TryStart); entries.Add(handler.TryEnd);
+                entries.Add(handler.HandlerStart); entries.Add(handler.HandlerEnd); entries.Add(handler.FilterStart);
+            }
+            for (int index = 0; index < il.Count; ++index)
+            {
+                if (il[index].OpCode.Code != Code.Call || !IsTrustedNameLoad(il[index].Operand as IMethod, method.Module, modules, "System.Reflection.AssemblyName")) continue;
+                int constructor = PreviousNonNop(il, index), literal = PreviousNonNop(il, constructor);
+                if (literal < 0 || il[literal].OpCode.Code != Code.Ldstr || il[constructor].OpCode.Code != Code.Newobj) continue;
+                var called = il[constructor].Operand as IMethod;
+                if (called == null || called is MethodSpec || called.Name != ".ctor" || called.MethodSig == null) continue;
+                MethodSig sig = called.MethodSig;
+                if (sig.CallingConvention != CallingConvention.HasThis || sig.GenParamCount != 0 || sig.ParamsAfterSentinel != null ||
+                    sig.Params.Count != 1 || sig.Params[0].ElementType != ElementType.String || sig.RetType.ElementType != ElementType.Void ||
+                    !IsTrustedCoreType(called.DeclaringType, "System.Reflection.AssemblyName", method.Module, modules)) continue;
+                bool singleEntry = true;
+                for (int cursor = literal + 1; cursor <= index; ++cursor) if (entries.Contains(il[cursor])) singleEntry = false;
+                string name = il[literal].Operand as string, provider = NameLoadProvider(name);
+                if (singleEntry && provider != null && modules.ContainsKey(provider)) result.Add(il[index], name);
+            }
+            return result;
+        }
+
+        private static int PreviousNonNop(IList<Instruction> il, int index)
+        {
+            while (--index >= 0 && il[index].OpCode.Code == Code.Nop) { }
+            return index;
+        }
+
+        private static bool IsTrustedNameLoad(IMethod method, ModuleDef module,
+            IReadOnlyDictionary<string, ModuleDefMD> modules, string parameter)
+        {
+            if (method == null || method is MethodSpec || method.Name != "Load" || method.MethodSig == null) return false;
+            MethodSig sig = method.MethodSig;
+            return sig.CallingConvention == CallingConvention.Default && sig.GenParamCount == 0 && sig.ParamsAfterSentinel == null && sig.Params.Count == 1 &&
+                IsTrustedCoreType(method.DeclaringType, "System.Reflection.Assembly", module, modules) &&
+                sig.RetType is ClassSig && IsTrustedCoreType(sig.RetType.ToTypeDefOrRef(), "System.Reflection.Assembly", module, modules) &&
+                (parameter == "System.String" ? sig.Params[0].ElementType == ElementType.String :
+                 sig.Params[0] is ClassSig && IsTrustedCoreType(sig.Params[0].ToTypeDefOrRef(), parameter, module, modules));
+        }
+
+        private static string StringNameLoadProvider(IMethod method, ModuleDef module,
+            IReadOnlyDictionary<string, ModuleDefMD> modules, string value)
+        {
+            if (method == null || method.DeclaringType == null || method.DeclaringType.FullName != "System.Reflection.Assembly" ||
+                method.Name != "Load" || method.MethodSig == null || method.MethodSig.Params.Count == 0 ||
+                method.MethodSig.Params[0].ElementType != ElementType.String) return null;
+            // Preserve the existing string-name API/compatible-core analysis.
+            // Only newly supported path forms require the stronger exact
+            // captured-framework proof; never apply it as a global resolver rule.
+            if (value != null && (value.IndexOf('/') >= 0 || value.IndexOf('\\') >= 0) &&
+                !IsTrustedNameLoad(method, module, modules, "System.String")) return null;
+            return NameLoadProvider(value);
+        }
+
+        private static bool IsTrustedCoreType(ITypeDefOrRef type, string name, ModuleDef module,
+            IReadOnlyDictionary<string, ModuleDefMD> modules)
+        {
+            // Production loading authenticates the supplied framework catalog.
+            // Do not resolve against the Editor domain/GAC or accept a business
+            // assembly merely because it declares a framework-looking type.
+            if (!(type is TypeRef) || type.FullName != name || type.DefinitionAssembly == null) return false;
+            IAssembly scope = type.DefinitionAssembly;
+            ModuleDefMD captured;
+            return scope.FullName == module.CorLibTypes.AssemblyRef.FullName &&
+                modules.TryGetValue(AssemblyIdentityUtil.CanonicalName(scope.Name), out captured) &&
+                captured.Assembly != null && captured.Assembly.FullName == scope.FullName;
+        }
+
+        // Contextual NAME lookup only. Do not use this for type AQNs, file loads
+        // or policy roles. The finite ASCII grammar avoids native NUL truncation,
+        // Unicode folding differences and ambiguous/escaped display names.
+        private static string NameLoadProvider(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Any(character => character < ' ' || character > '~')) return null;
+            string[] parts = value.Split(',');
+            string name = parts[0].Trim();
+            if (name.Length == 0 || name.Any(character => !IsNameCharacter(character) && character != '/' && character != '\\')) return null;
+            var fields = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int index = 1; index < parts.Length; ++index)
+            {
+                string[] pair = parts[index].Trim().Split('=');
+                if (pair.Length != 2 || !fields.Add(pair[0])) return null;
+                string field = pair[0], text = pair[1];
+                if (field.Equals("Version", StringComparison.OrdinalIgnoreCase))
+                {
+                    string[] numbers = text.Split('.'); ushort number;
+                    if (numbers.Length != 4 || numbers.Any(item => item.Length == 0 || item.Any(character => character < '0' || character > '9') || !ushort.TryParse(item, out number))) return null;
+                }
+                else if (field.Equals("Culture", StringComparison.OrdinalIgnoreCase))
+                { if (text.Length == 0 || text.Any(character => !IsNameCharacter(character) || character == '.')) return null; }
+                else if (field.Equals("PublicKeyToken", StringComparison.OrdinalIgnoreCase))
+                { if (text != "null" && (text.Length != 16 || text.Any(character => !Uri.IsHexDigit(character)))) return null; }
+                else return null;
+            }
+            int slash = Math.Max(name.LastIndexOf('/'), name.LastIndexOf('\\'));
+            if (slash >= 0) name = name.Substring(slash + 1);
+            if (name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 4);
+            return name.Length == 0 || name == "." || name == ".." ? null : name.ToLowerInvariant();
+        }
+
+        private static bool IsNameCharacter(char value)
+        {
+            return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '.' || value == '_' || value == '-';
         }
 
         internal static string AssemblyNameFromQualifiedType(string name)
