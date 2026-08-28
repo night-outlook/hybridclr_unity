@@ -108,5 +108,21 @@ namespace HybridCLR
         [MethodImpl(MethodImplOptions.InternalCall)]
         public static extern AssemblyShadowErrorCode GetDiagnosticsJson(out string json);
 #endif
+
+        /// <summary>
+        /// Gets the separate schema 1 type-resolution diagnostic without changing
+        /// transaction state. Pointer details are optional development evidence,
+        /// not stable type identities. Editor and Mono execution are unsupported.
+        /// </summary>
+#if UNITY_EDITOR || !ENABLE_IL2CPP
+        public static AssemblyShadowErrorCode GetTypeResolutionInfo(Type type, out string json)
+        {
+            json = null;
+            throw new NotSupportedException("Assembly Shadow requires a native IL2CPP Player; Editor and Mono execution are unsupported.");
+        }
+#else
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        public static extern AssemblyShadowErrorCode GetTypeResolutionInfo(Type type, out string json);
+#endif
     }
 }
