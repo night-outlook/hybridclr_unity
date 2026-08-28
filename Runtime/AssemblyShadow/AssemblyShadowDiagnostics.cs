@@ -1,35 +1,39 @@
 using System;
 using UnityEngine;
+using UnityEngine.Scripting;
 
 namespace HybridCLR
 {
     /// <summary>Schema 1 diagnostics returned by <see cref="AssemblyShadowRuntime.GetDiagnosticsJson"/>.</summary>
-    [Serializable]
+    // JsonUtility reads the complete native schema, including fields unused by
+    // managed callers. Preserve fields explicitly: preserving a type alone only
+    // retains its constructor, so linked Players can otherwise lose evidence.
+    [Serializable, Preserve]
     public sealed class AssemblyShadowDiagnostics
     {
-        public int schemaVersion;
-        public bool enabled;
-        public int runtimeAbiVersion;
-        public string state;
-        public int stateCode;
-        public int lastError;
-        public string detail;
-        public string baselineBuildId;
-        public string patchId;
-        public long generation;
-        public long expected;
-        public long staged;
-        public long retainedBytes;
-        public long enumerationGeneration;
-        public AssemblyShadowOrdinaryAssembly[] ordinaryAssemblies;
-        public long classEnumerationGeneration;
-        public AssemblyShadowOrdinaryClass[] ordinaryClasses;
-        public string[] closureLoadOrder;
-        public string[] stableAotNames;
-        public string[] commitOrder;
-        public AssemblyShadowDiagnosticAssembly[] assemblies;
-        public AssemblyShadowDiagnosticEvent[] events;
-        public AssemblyShadowBaselineUse[] baselineUses;
+        [Preserve] public int schemaVersion;
+        [Preserve] public bool enabled;
+        [Preserve] public int runtimeAbiVersion;
+        [Preserve] public string state;
+        [Preserve] public int stateCode;
+        [Preserve] public int lastError;
+        [Preserve] public string detail;
+        [Preserve] public string baselineBuildId;
+        [Preserve] public string patchId;
+        [Preserve] public long generation;
+        [Preserve] public long expected;
+        [Preserve] public long staged;
+        [Preserve] public long retainedBytes;
+        [Preserve] public long enumerationGeneration;
+        [Preserve] public AssemblyShadowOrdinaryAssembly[] ordinaryAssemblies;
+        [Preserve] public long classEnumerationGeneration;
+        [Preserve] public AssemblyShadowOrdinaryClass[] ordinaryClasses;
+        [Preserve] public string[] closureLoadOrder;
+        [Preserve] public string[] stableAotNames;
+        [Preserve] public string[] commitOrder;
+        [Preserve] public AssemblyShadowDiagnosticAssembly[] assemblies;
+        [Preserve] public AssemblyShadowDiagnosticEvent[] events;
+        [Preserve] public AssemblyShadowBaselineUse[] baselineUses;
 
         /// <summary>Parses schema 1 JSON produced by the native runtime.</summary>
         public static AssemblyShadowDiagnostics Parse(string json)
@@ -70,53 +74,53 @@ namespace HybridCLR
         }
     }
 
-    [Serializable]
+    [Serializable, Preserve]
     public sealed class AssemblyShadowOrdinaryAssembly
     {
-        public string name;
-        public bool isInterpreter;
+        [Preserve] public string name;
+        [Preserve] public bool isInterpreter;
     }
 
-    [Serializable]
+    [Serializable, Preserve]
     public sealed class AssemblyShadowOrdinaryClass
     {
-        public string assemblyName;
-        public string typeName;
-        public bool isInterpreter;
-        public bool isConstructedGeneric;
-        public bool usesStagedMetadata;
+        [Preserve] public string assemblyName;
+        [Preserve] public string typeName;
+        [Preserve] public bool isInterpreter;
+        [Preserve] public bool isConstructedGeneric;
+        [Preserve] public bool usesStagedMetadata;
     }
 
-    [Serializable]
+    [Serializable, Preserve]
     public sealed class AssemblyShadowDiagnosticAssembly
     {
-        public string name;
-        public string mvid;
-        public bool skeletonBuilt;
-        public bool runtimeMetadataInitialized;
-        public bool published;
-        public bool moduleInitializerAttempted;
-        public bool moduleInitializerRan;
+        [Preserve] public string name;
+        [Preserve] public string mvid;
+        [Preserve] public bool skeletonBuilt;
+        [Preserve] public bool runtimeMetadataInitialized;
+        [Preserve] public bool published;
+        [Preserve] public bool moduleInitializerAttempted;
+        [Preserve] public bool moduleInitializerRan;
     }
 
-    [Serializable]
+    [Serializable, Preserve]
     public sealed class AssemblyShadowDiagnosticEvent
     {
-        public long sequence;
-        public string kind;
-        public string name;
-        public long generation;
-        public int stagedCount;
+        [Preserve] public long sequence;
+        [Preserve] public string kind;
+        [Preserve] public string name;
+        [Preserve] public long generation;
+        [Preserve] public int stagedCount;
     }
 
-    [Serializable]
+    [Serializable, Preserve]
     public sealed class AssemblyShadowBaselineUse
     {
-        public string name;
-        public string kind;
-        public string detail;
-        public string type;
-        public long thread;
-        public long timestamp;
+        [Preserve] public string name;
+        [Preserve] public string kind;
+        [Preserve] public string detail;
+        [Preserve] public string type;
+        [Preserve] public long thread;
+        [Preserve] public long timestamp;
     }
 }
