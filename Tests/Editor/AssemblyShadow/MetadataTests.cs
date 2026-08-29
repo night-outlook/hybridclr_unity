@@ -284,6 +284,31 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         }
 
         [Test]
+        public void LoaderAllowsOptionalForwardedTypesOnlyInsideFixedPrecompiledRuntimePlugins()
+        {
+            using (var fixture = new FacadeFixture())
+            {
+                fixture.WriteConsumer("Fixture.Facade", "Optional");
+                var role = new AssemblyCapability { name = "Consumer", classification = AssemblyClassification.Runtime,
+                    isPrecompiled = true, capabilityDeclared = true };
+                using (CompiledAssemblySet set = fixture.Load(new[] { role }))
+                {
+                    Assert.IsTrue(set.Get("Consumer").isPrecompiled);
+                    Assert.IsNull(set.ResolveType(set.GetModule("Consumer").GetTypeRefs().Single(t => t.Name == "Optional")));
+                }
+
+                role.isShadowCapable = true;
+                Assert.AreEqual("UnresolvedForwardedType", Assert.Throws<ShadowBuildException>(() => fixture.Load(new[] { role })).Code);
+                role.isShadowCapable = false;
+                role.isBootstrap = true;
+                Assert.AreEqual("UnresolvedForwardedType", Assert.Throws<ShadowBuildException>(() => fixture.Load(new[] { role })).Code);
+                role.isBootstrap = false;
+                role.classification = AssemblyClassification.NormalHotUpdate;
+                Assert.AreEqual("UnresolvedForwardedType", Assert.Throws<ShadowBuildException>(() => fixture.Load(new[] { role })).Code);
+            }
+        }
+
+        [Test]
         public void LoaderStillRequiresDirectReferencesFromBuildFilteredSnapshots()
         {
             using (var fixture = new FacadeFixture())

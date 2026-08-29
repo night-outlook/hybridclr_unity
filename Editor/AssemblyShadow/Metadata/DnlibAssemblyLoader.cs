@@ -130,8 +130,19 @@ namespace HybridCLR.Editor.AssemblyShadow
                         // but are not runtime consumers. NormalHotUpdate is deliberately
                         // not excluded: it still executes after dynamic loading.
                         AssemblyCapability capability;
-                        if (capabilityMap.TryGetValue(name, out capability) && capability.classification == AssemblyClassification.BuildFiltered)
-                            continue;
+                        if (capabilityMap.TryGetValue(name, out capability))
+                        {
+                            if (capability.classification == AssemblyClassification.BuildFiltered)
+                                continue;
+                            // Fixed precompiled Runtime plugins can contain optional
+                            // target-profile APIs in code Unity later strips. Their
+                            // AssemblyRefs and identities remain closed above, while
+                            // source modules, candidates, Bootstrap and dynamically
+                            // loaded NormalHotUpdate plugins retain full TypeRef checks.
+                            if (capability.classification == AssemblyClassification.Runtime && capability.isPrecompiled &&
+                                !capability.isShadowCapable && !capability.isBootstrap)
+                                continue;
+                        }
                         ModuleDefMD requester = moduleByName[name];
                         foreach (TypeRef reference in requester.GetTypeRefs())
                         {
