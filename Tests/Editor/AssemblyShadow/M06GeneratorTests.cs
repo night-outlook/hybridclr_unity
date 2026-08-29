@@ -233,6 +233,8 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             hash = ShadowGenerationOutput.ComputeHash(output); output.managedToNative[0].capacity++;
             Assert.AreNotEqual(hash, ShadowGenerationOutput.ComputeHash(output)); hash = ShadowGenerationOutput.ComputeHash(output);
             output.structMappings[0].key = "Other:S"; Assert.AreNotEqual(hash, ShadowGenerationOutput.ComputeHash(output));
+            output.outputHash = "stored-self-hash"; ShadowGenerationOutput.ComputeHash(output);
+            Assert.AreEqual("stored-self-hash", output.outputHash, "Hashing must restore the self-excluded field even when it is already populated.");
         }
 
         [Test] public void ActualCompiledReferencesSelectOnlyReverseClosureAndRejectFixedConsumers()

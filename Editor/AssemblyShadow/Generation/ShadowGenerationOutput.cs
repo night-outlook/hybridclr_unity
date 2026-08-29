@@ -36,9 +36,19 @@ namespace HybridCLR.Editor.AssemblyShadow
         private readonly string receiptSha256;
         public string ReceiptPath { get; private set; }
         public string OutputHash { get { return receipt.outputHash; } }
+        public string Stage { get { return receipt.stage; } }
+        public string OutputPath { get { return receipt.outputPath; } }
+        public string OutputSha256 { get { return receipt.outputSha256; } }
+        public bool Development { get { return receipt.development; } }
+        public string[] EmittedAssemblyNames { get { return (receipt.emittedAssemblyNames ?? new string[0]).ToArray(); } }
         public ShadowGenerationOutputReceipt Receipt { get { return GenerationIO.Clone(receipt); } }
         internal ShadowGenerationOutput(string path, ShadowGenerationOutputReceipt receipt, VerifiedGenerationPlan plan, VerifiedGenerationAotInputs aot, string receiptSha256)
-        { ReceiptPath = Path.GetFullPath(path); this.receipt = GenerationIO.Clone(receipt); this.plan = plan; this.aot = aot; this.receiptSha256 = receiptSha256; }
+        {
+            // ReadAndVerify owns this freshly deserialized receipt. Keeping that
+            // private instance avoids serializing and deserializing very large
+            // method inventories a second time; public access remains cloned.
+            ReceiptPath = Path.GetFullPath(path); this.receipt = receipt; this.plan = plan; this.aot = aot; this.receiptSha256 = receiptSha256;
+        }
 
         internal static ShadowGenerationOutput Seal(string outputFile, VerifiedGenerationPlan plan, VerifiedGenerationAotInputs aot, ShadowGenerationOutputReceipt receipt)
         {
@@ -75,7 +85,22 @@ namespace HybridCLR.Editor.AssemblyShadow
             return new ShadowGenerationOutput(receiptPath, receipt, plan, aot, receiptSha256);
         }
         public static string ComputeHash(ShadowGenerationOutputReceipt receipt)
-        { var copy = GenerationIO.Clone(receipt); copy.outputHash = null; return ShadowHash.Text("assembly-shadow-generation-output:1\n" + Convert.ToBase64String(GenerationIO.Bytes(copy))); }
+        {
+            ShadowHash.Require(receipt != null, "GenerationOutputReceipt", "A generation output receipt is required.");
+            // outputHash is the only self-excluded field. Serialize the complete
+            // DTO once while it is null instead of cloning the potentially tens
+            // of megabytes of collector evidence through the serializer first.
+            lock (receipt)
+            {
+                string outputHash = receipt.outputHash;
+                try
+                {
+                    receipt.outputHash = null;
+                    return ShadowHash.Text("assembly-shadow-generation-output:1\n" + Convert.ToBase64String(GenerationIO.Bytes(receipt)));
+                }
+                finally { receipt.outputHash = outputHash; }
+            }
+        }
 
         public static void RequireCoverage(ShadowGenerationOutput selected, params ShadowGenerationOutput[] required)
         {
