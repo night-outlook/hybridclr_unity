@@ -33,11 +33,12 @@ namespace HybridCLR.Editor.AssemblyShadow
         private readonly ShadowGenerationOutputReceipt receipt;
         private readonly VerifiedGenerationPlan plan;
         private readonly VerifiedGenerationAotInputs aot;
+        private readonly string receiptSha256;
         public string ReceiptPath { get; private set; }
         public string OutputHash { get { return receipt.outputHash; } }
         public ShadowGenerationOutputReceipt Receipt { get { return GenerationIO.Clone(receipt); } }
-        internal ShadowGenerationOutput(string path, ShadowGenerationOutputReceipt receipt, VerifiedGenerationPlan plan, VerifiedGenerationAotInputs aot)
-        { ReceiptPath = Path.GetFullPath(path); this.receipt = GenerationIO.Clone(receipt); this.plan = plan; this.aot = aot; }
+        internal ShadowGenerationOutput(string path, ShadowGenerationOutputReceipt receipt, VerifiedGenerationPlan plan, VerifiedGenerationAotInputs aot, string receiptSha256)
+        { ReceiptPath = Path.GetFullPath(path); this.receipt = GenerationIO.Clone(receipt); this.plan = plan; this.aot = aot; this.receiptSha256 = receiptSha256; }
 
         internal static ShadowGenerationOutput Seal(string outputFile, VerifiedGenerationPlan plan, VerifiedGenerationAotInputs aot, ShadowGenerationOutputReceipt receipt)
         {
@@ -52,7 +53,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         public static ShadowGenerationOutput ReadAndVerify(string receiptPath, VerifiedGenerationPlan plan, VerifiedGenerationAotInputs aot = null, string expectedHash = null)
         {
             plan.VerifyUnchanged(); if (aot != null) aot.VerifyUnchanged(plan);
-            var receipt = GenerationIO.Read<ShadowGenerationOutputReceipt>(receiptPath);
+            string receiptSha256;
+            var receipt = GenerationIO.Read<ShadowGenerationOutputReceipt>(receiptPath, out receiptSha256);
             ShadowHash.Require(receipt.schemaVersion == 1 && receipt.kind == "GenerationOutput" &&
                 new[] { "Link", "MethodBridge", "AotGenericReference" }.Contains(receipt.stage) && receipt.planHash == plan.PlanHash &&
                 receipt.target == plan.Target && receipt.architecture == plan.Architecture &&
@@ -70,7 +72,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             foreach (var entries in new[] { receipt.managedToNative, receipt.nativeToManaged, receipt.adjustThunks, receipt.reversePInvoke, receipt.calli, receipt.structMappings })
                 ShadowHash.Require(entries != null && entries.All(entry => entry != null && !string.IsNullOrEmpty(entry.key) && !string.IsNullOrEmpty(entry.abi) && entry.capacity > 0) &&
                     entries.Select(entry => entry.key).Distinct(StringComparer.Ordinal).Count() == entries.Length, "GenerationOutputReceipt", "Invalid optimized inventory.");
-            return new ShadowGenerationOutput(receiptPath, receipt, plan, aot);
+            return new ShadowGenerationOutput(receiptPath, receipt, plan, aot, receiptSha256);
         }
         public static string ComputeHash(ShadowGenerationOutputReceipt receipt)
         { var copy = GenerationIO.Clone(receipt); copy.outputHash = null; return ShadowHash.Text("assembly-shadow-generation-output:1\n" + Convert.ToBase64String(GenerationIO.Bytes(copy))); }
@@ -96,22 +98,36 @@ namespace HybridCLR.Editor.AssemblyShadow
         private void VerifyFile()
         {
             plan.VerifyUnchanged(); if (aot != null) aot.VerifyUnchanged(plan);
-            ShadowHash.Require(GenerationIO.Equal(GenerationIO.Read<ShadowGenerationOutputReceipt>(ReceiptPath), receipt) &&
+            ShadowHash.Require(ShadowHash.File(ReceiptPath) == receiptSha256 &&
                 ShadowHash.File(ShadowHash.SafeChild(Path.GetDirectoryName(ReceiptPath), receipt.outputPath)) == receipt.outputSha256,
                 "GenerationOutputMutation", ReceiptPath);
         }
         private static void RequireEntries(GenerationAbiEntry[] selected, GenerationAbiEntry[] required, string kind)
         {
             ShadowHash.Require(selected != null && required != null, "GenerationCoverage", kind);
+            var capacities = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var candidate in selected)
+            {
+                if (candidate == null || string.IsNullOrEmpty(candidate.abi) || candidate.capacity <= 0) continue;
+                int capacity;
+                if (!capacities.TryGetValue(candidate.abi, out capacity) || capacity < candidate.capacity)
+                    capacities[candidate.abi] = candidate.capacity;
+            }
             foreach (var entry in required)
-                ShadowHash.Require(entry != null && entry.capacity > 0 && selected.Any(candidate => candidate != null && candidate.abi == entry.abi && candidate.capacity >= entry.capacity),
+            {
+                int capacity;
+                ShadowHash.Require(entry != null && entry.capacity > 0 && !string.IsNullOrEmpty(entry.abi) &&
+                    capacities.TryGetValue(entry.abi, out capacity) && capacity >= entry.capacity,
                     "GenerationCoverage", kind + " missing structural ABI/capacity: " + (entry == null ? "null" : entry.abi));
+            }
         }
         private static void RequireStructMappings(GenerationAbiEntry[] selected, GenerationAbiEntry[] required)
         {
             ShadowHash.Require(selected != null && required != null, "GenerationCoverage", "Missing struct inventory.");
+            var mappings = new HashSet<Tuple<string, string>>(selected.Where(candidate => candidate != null)
+                .Select(candidate => Tuple.Create(candidate.key, candidate.abi)));
             foreach (var entry in required)
-                ShadowHash.Require(entry != null && selected.Any(candidate => candidate != null && candidate.key == entry.key && candidate.abi == entry.abi),
+                ShadowHash.Require(entry != null && mappings.Contains(Tuple.Create(entry.key, entry.abi)),
                     "GenerationCoverage", "Missing runtime struct signature mapping: " + (entry == null ? "null" : entry.key));
         }
         internal static GenerationAbiEntry[] Entries(IReadOnlyList<GeneratedBridgeSignature> entries)

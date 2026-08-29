@@ -1,5 +1,6 @@
 ﻿using dnlib.DotNet;
 using HybridCLR.Editor.ABI;
+using HybridCLR.Editor.AssemblyShadow;
 using HybridCLR.Editor.Meta;
 using System;
 using System.Collections.Generic;
@@ -188,10 +189,16 @@ namespace HybridCLR.Editor.MethodBridge
                 _newMethods = temp;
                 _newMethods.Clear();
 
-                Task.WaitAll(_processingMethods.Select(method => Task.Run(() =>
+                _processingMethods = _processingMethods.Select(method => new { method, key = GenerationSignatures.Method(method) })
+                    .OrderBy(item => item.key, StringComparer.Ordinal).Select(item => item.method).ToList();
+                var discovered = new IReadOnlyList<GenericMethod>[_processingMethods.Count];
+                Task.WaitAll(_processingMethods.Select((method, index) => Task.Run(() =>
+                    discovered[index] = _methodReferenceAnalyzer.CollectMethods(method.Method, method.KlassInst, method.MethodInst))).ToArray());
+                for (int methodIndex = 0; methodIndex < discovered.Length; ++methodIndex)
                 {
-                    _methodReferenceAnalyzer.WalkMethod(method.Method, method.KlassInst, method.MethodInst);
-                })).ToArray());
+                    foreach (var method in discovered[methodIndex])
+                        OnNewMethod(method.Method, method.KlassInst, method.MethodInst, method);
+                }
                 Debug.Log($"iteration:[{i}] genericClass:{_genericTypes.Count} genericMethods:{_genericMethods.Count} newMethods:{_newMethods.Count}");
             }
         }

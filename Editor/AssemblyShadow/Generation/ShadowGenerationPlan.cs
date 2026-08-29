@@ -216,11 +216,17 @@ namespace HybridCLR.Editor.AssemblyShadow
         internal static void Write<T>(string path, T value) { File.WriteAllBytes(path, Bytes(value)); }
         internal static T Read<T>(string path)
         {
+            string ignored;
+            return Read<T>(path, out ignored);
+        }
+        internal static T Read<T>(string path, out string bytesSha256)
+        {
             byte[] bytes = File.ReadAllBytes(path); T result;
             using (var stream = new MemoryStream(bytes)) result = (T)new DataContractJsonSerializer(typeof(T)).ReadObject(stream);
             // This new domain has one canonical wire representation. Unknown,
             // missing or duplicate fields cannot disappear during deserialization.
             ShadowHash.Require(Bytes(result).SequenceEqual(bytes), "GenerationJson", path);
+            bytesSha256 = ShadowHash.Bytes(bytes);
             return result;
         }
         internal static void NewRoot(string root)

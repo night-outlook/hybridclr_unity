@@ -1,5 +1,6 @@
 ﻿using dnlib.DotNet;
 using HybridCLR.Editor.ABI;
+using HybridCLR.Editor.AssemblyShadow;
 using HybridCLR.Editor.Meta;
 using HybridCLR.Editor.Template;
 using System;
@@ -88,7 +89,7 @@ namespace HybridCLR.Editor.MethodBridge
 
         public Generator(Options options)
         {
-            List<(GenericMethod, string)> genericMethodInfo = options.GenericMethods.Select(m => (m, m.ToString())).ToList();
+            List<(GenericMethod, string)> genericMethodInfo = options.GenericMethods.Select(m => (m, GenerationSignatures.Method(m))).ToList();
             genericMethodInfo.Sort((a, b) => string.CompareOrdinal(a.Item2, b.Item2));
             _genericMethods = genericMethodInfo.Select(m => m.Item1).ToList();
             _originalReversePInvokeMethods = options.ReversePInvokeMethods;

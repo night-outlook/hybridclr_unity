@@ -36,6 +36,18 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
         }
 
+        [Test] public void GeneratorOrderingIncludesAssemblyIdentityForEqualDisplaySignatures()
+        {
+            using (var fixture = new EqualDisplaySignatureFixture())
+            {
+                Assert.AreEqual(fixture.First.ToString(), fixture.Second.ToString());
+                var forward = fixture.Generator("forward.cpp", fixture.First, fixture.Second); forward.Generate();
+                var reverse = fixture.Generator("reverse.cpp", fixture.Second, fixture.First); reverse.Generate();
+                CollectionAssert.AreEqual(File.ReadAllBytes(fixture.PathOf("forward.cpp")), File.ReadAllBytes(fixture.PathOf("reverse.cpp")));
+                CollectionAssert.AreEqual(forward.Prepare().StructMappings.Select(item => item.Key), reverse.Prepare().StructMappings.Select(item => item.Key));
+            }
+        }
+
         [Test] public void ActualGeneratedMethodEntriesGuardBeforeDispatchButCalliHasNoInventedMethod()
         {
             using (var fixture = new Fixture())
@@ -69,6 +81,10 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 Assert.Throws<ShadowBuildException>(() => RequireEntries(selected, new[] { Entry("s0", actual.Abi, 4) }));
                 Assert.Throws<ShadowBuildException>(() => RequireEntries(selected, new[] { Entry("s9", actual.Abi + "different-layout", 1) }));
                 Assert.Throws<ShadowBuildException>(() => RequireEntries(selected, new[] { Entry("s9", actual.Abi, 0) }));
+                Assert.DoesNotThrow(() => RequireEntries(new[] { null, Entry("first", actual.Abi, 1), Entry("second", actual.Abi, 5) },
+                    new[] { Entry("required", actual.Abi, 4) }));
+                Assert.Throws<ShadowBuildException>(() => RequireEntries(new[] { Entry("first", actual.Abi, 1), Entry("second", actual.Abi, 5) },
+                    new[] { Entry("required", actual.Abi, 6) }));
             }
         }
 
@@ -377,6 +393,48 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             internal GenerationImage Image(string relative, string pdb = null)
             { return (GenerationImage)Invoke(Io.GetMethod("Image", BindingFlags.NonPublic | BindingFlags.Static), null, Root, relative, pdb, PathOf(relative), "Compiler"); }
             public void Dispose() { Module.Dispose(); core.Dispose(); if (Directory.Exists(Root)) Directory.Delete(Root, true); }
+        }
+
+        private sealed class EqualDisplaySignatureFixture : IDisposable
+        {
+            private readonly string root = Path.Combine(Path.GetTempPath(), "M06EqualDisplay-" + Guid.NewGuid().ToString("N"));
+            private readonly ModuleDefUser firstModule;
+            private readonly ModuleDefUser secondModule;
+            internal readonly GenericMethod First;
+            internal readonly GenericMethod Second;
+
+            internal EqualDisplaySignatureFixture()
+            {
+                Directory.CreateDirectory(root);
+                First = Create("First", 1, out firstModule);
+                Second = Create("Second", 2, out secondModule);
+            }
+
+            private static GenericMethod Create(string assemblyName, int fieldCount, out ModuleDefUser module)
+            {
+                module = new ModuleDefUser(assemblyName + ".dll") { Kind = ModuleKind.Dll };
+                new AssemblyDefUser(assemblyName, new Version(1, 0, 0, 0)).Modules.Add(module);
+                var payload = new TypeDefUser("Fixture", "Payload", new TypeRefUser(module, "System", "ValueType", module.CorLibTypes.AssemblyRef))
+                    { Attributes = dnlib.DotNet.TypeAttributes.Public | dnlib.DotNet.TypeAttributes.SequentialLayout | dnlib.DotNet.TypeAttributes.Sealed };
+                for (int i = 0; i < fieldCount; ++i)
+                    payload.Fields.Add(new FieldDefUser("value" + i, new FieldSig(module.CorLibTypes.Int32), dnlib.DotNet.FieldAttributes.Public));
+                module.Types.Add(payload);
+                var host = new TypeDefUser("Fixture", "Host", module.CorLibTypes.Object.TypeDefOrRef) { Attributes = dnlib.DotNet.TypeAttributes.Public };
+                module.Types.Add(host);
+                var method = new MethodDefUser("Same", MethodSig.CreateStatic(payload.ToTypeSig()),
+                    dnlib.DotNet.MethodAttributes.Public | dnlib.DotNet.MethodAttributes.Static) { Body = new CilBody() };
+                method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret)); host.Methods.Add(method);
+                return new GenericMethod(method, null, null);
+            }
+
+            internal Generator Generator(string output, params GenericMethod[] methods)
+            {
+                return new Generator(new Generator.Options { TemplateCode = Fixture.Template, OutputFile = PathOf(output), GenericMethods = methods,
+                    ReversePInvokeMethods = new List<RawMonoPInvokeCallbackMethodInfo>(), CalliMethodSignatures = new CallNativeMethodSignatureInfo[0], Log = _ => { } });
+            }
+
+            internal string PathOf(string relative) { return Path.Combine(root, relative); }
+            public void Dispose() { firstModule.Dispose(); secondModule.Dispose(); if (Directory.Exists(root)) Directory.Delete(root, true); }
         }
     }
 }
