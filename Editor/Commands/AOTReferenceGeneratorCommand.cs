@@ -24,7 +24,10 @@ namespace HybridCLR.Editor.Commands
             {
                 var roots = plan.SelectedNames.ToList(); var collector = new AssemblyReferenceDeepCollector(resolver, roots); resolver.Bind(collector);
                 var analyzer = new Analyzer(new Analyzer.Options { Collector = collector, MaxIterationCount = maxIterations }); analyzer.Run();
-                new GenericReferenceWriter().Write(analyzer.AotGenericTypes.ToList(), analyzer.AotGenericMethods.ToList(), outputFile);
+                string[] emittedAssemblyNames = resolver.ResolveStrippedImplementationAssemblyNames(
+                    analyzer.AotGenericTypes.Select(type => type.Type.FullName)
+                        .Concat(analyzer.AotGenericMethods.Select(method => method.Method.DeclaringType.FullName)));
+                new GenericReferenceWriter().Write(analyzer.AotGenericTypes.ToList(), analyzer.AotGenericMethods.ToList(), outputFile, emittedAssemblyNames);
                 return ShadowGenerationOutput.Seal(outputFile, plan, aot, new ShadowGenerationOutputReceipt
                 {
                     stage = "AotGenericReference", maxIterations = maxIterations, collectorRoots = roots.ToArray(), resolverCatalog = resolver.Catalog.ToArray(),
@@ -35,8 +38,7 @@ namespace HybridCLR.Editor.Commands
                     // These names are executable generated data. The type and
                     // method inventories above describe collection, not C#
                     // executable generic instantiation (the writer uses comments).
-                    emittedAssemblyNames = analyzer.AotGenericTypes.Select(type => type.Type.Module).Concat(analyzer.AotGenericMethods.Select(method => method.Method.Module))
-                        .Distinct().Select(module => module.Name.String).OrderBy(name => name, StringComparer.Ordinal).ToArray()
+                    emittedAssemblyNames = emittedAssemblyNames
                 });
             }
         }

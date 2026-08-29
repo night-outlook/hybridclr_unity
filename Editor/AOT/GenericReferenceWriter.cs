@@ -60,6 +60,11 @@ namespace HybridCLR.Editor.AOT
 
         public void Write(List<GenericClass> types, List<GenericMethod> methods, string outputFile)
         {
+            Write(types, methods, outputFile, null);
+        }
+
+        public void Write(List<GenericClass> types, List<GenericMethod> methods, string outputFile, IEnumerable<string> patchedAotAssemblyNames)
+        {
             string parentDir = Directory.GetParent(outputFile).FullName;
             Directory.CreateDirectory(parentDir);
 
@@ -72,12 +77,17 @@ namespace HybridCLR.Editor.AOT
             codes.Add("\t// {{ AOT assemblies");
             codes.Add("\tpublic static readonly IReadOnlyList<string> PatchedAOTAssemblyList = new List<string>");
             codes.Add("\t{");
-            List<dnlib.DotNet.ModuleDef> modules = new HashSet<dnlib.DotNet.ModuleDef>(
-                types.Select(t => t.Type.Module).Concat(methods.Select(m => m.Method.Module))).ToList();
-            modules.Sort((a, b) => a.Name.CompareTo(b.Name));
-            foreach (dnlib.DotNet.ModuleDef module in modules)
+            string[] assemblyNames = patchedAotAssemblyNames == null
+                ? new HashSet<dnlib.DotNet.ModuleDef>(types.Select(t => t.Type.Module).Concat(methods.Select(m => m.Method.Module)))
+                    .Select(module => module.Name.String).OrderBy(name => name, StringComparer.Ordinal).ToArray()
+                : patchedAotAssemblyNames.Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal).ToArray();
+            foreach (string assemblyName in assemblyNames)
             {
-                codes.Add($"\t\t\"{module.Name}\",");
+                if (string.IsNullOrWhiteSpace(assemblyName) || assemblyName.IndexOfAny(new[] { '/', '\\', '"', ',', '\r', '\n' }) >= 0)
+                {
+                    throw new ArgumentException("Invalid patched AOT assembly name: " + assemblyName, nameof(patchedAotAssemblyNames));
+                }
+                codes.Add($"\t\t\"{assemblyName}\",");
             }
             codes.Add("\t};");
             codes.Add("\t// }}");

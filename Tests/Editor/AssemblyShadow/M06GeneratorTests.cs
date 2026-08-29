@@ -7,6 +7,7 @@ using System.Runtime.Serialization.Json;
 using System.Text;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
+using HybridCLR.Editor.AOT;
 using HybridCLR.Editor.Commands;
 using HybridCLR.Editor.Meta;
 using HybridCLR.Editor.MethodBridge;
@@ -130,6 +131,44 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                     Assert.Throws<ShadowBuildException>(() => resolver.ResolveAssembly("Fixture", true));
                 }
             }
+        }
+
+        [Test] public void SupplementaryMetadataNamesResolveFacadeTypesToPhysicalStrippedProviders()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "M06AotProviders-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                WriteProviderModule(root, "netstandard.dll", "netstandard", "System", "FacadeGeneric`1");
+                WriteProviderModule(root, "mscorlib.dll", "mscorlib", "System", "FacadeGeneric`1");
+                var facade = ProviderImage(root, "netstandard.dll", "Reference");
+                var physical = ProviderImage(root, "mscorlib.dll", "StrippedAot");
+                using (var resolver = Resolver(root, facade, physical))
+                {
+                    resolver.Bind(new AssemblyCache(resolver));
+                    var method = typeof(GenerationAssemblyResolver).GetMethod("ResolveStrippedImplementationAssemblyNames", BindingFlags.Instance | BindingFlags.NonPublic);
+                    CollectionAssert.AreEqual(new[] { "mscorlib.dll" },
+                        (string[])Invoke(method, resolver, (object)new[] { "System.FacadeGeneric`1", "System.FacadeGeneric`1" }));
+                    Assert.AreEqual("GenerationAotProvider", Assert.Throws<ShadowBuildException>(() =>
+                        Invoke(method, resolver, (object)new[] { "System.Missing`1" })).Code);
+                }
+            }
+            finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+        }
+
+        [Test] public void GenericReferenceWriterUsesExplicitPhysicalAssemblyNames()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "M06AotWriter-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                string generated = Path.Combine(root, "AOTGenericReferences.cs");
+                new GenericReferenceWriter().Write(new List<GenericClass>(), new List<GenericMethod>(), generated, new[] { "mscorlib.dll" });
+                string code = File.ReadAllText(generated);
+                StringAssert.Contains("\"mscorlib.dll\"", code);
+                StringAssert.DoesNotContain("\"netstandard.dll\"", code);
+            }
+            finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         }
 
         [Test] public void CapturedIdentityMvidAndPdbBytesCannotBeChanged()
@@ -309,6 +348,17 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 module.Write(Path.Combine(root, name + ".dll"));
             }
         }
+        private static void WriteProviderModule(string root, string moduleName, string assemblyName, string typeNamespace, string typeName)
+        {
+            using (var module = new ModuleDefUser(moduleName) { Kind = ModuleKind.Dll })
+            {
+                new AssemblyDefUser(assemblyName, new Version(1, 0, 0, 0)).Modules.Add(module);
+                module.Types.Add(new TypeDefUser(typeNamespace, typeName, null) { Attributes = dnlib.DotNet.TypeAttributes.Public });
+                module.Write(Path.Combine(root, moduleName));
+            }
+        }
+        private static GenerationImage ProviderImage(string root, string relative, string role)
+        { return (GenerationImage)Invoke(Io.GetMethod("Image", BindingFlags.NonPublic | BindingFlags.Static), null, root, relative, null, Path.Combine(root, relative), role); }
 
         [Test] public void LegacyMenuSignaturesRemainAlongsideExplicitPlanOverloads()
         {
