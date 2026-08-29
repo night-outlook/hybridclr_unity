@@ -89,6 +89,30 @@ namespace HybridCLR.Editor.AssemblyShadow
             IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null, VerifiedLinkedRuntimeReferences linkedRuntimeReferences = null,
             RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null)
         {
+            return ValidateCompiledInternal(set, policy, utcNow, acquisitionConfiguration, fixedImageEvidence,
+                linkedRuntimeReferences, rawTypeAdmissionConfiguration, false);
+        }
+
+        /// <summary>
+        /// Validates a compiler-only snapshot before Unity has produced the
+        /// authoritative Player filter/linker receipt. Reflection scanning is
+        /// complete for the connected shadow-policy graph; disconnected Unity
+        /// package inputs are deferred to the later strict linked-Player gate.
+        /// </summary>
+        public static ShadowPolicyValidationResult ValidateCompilerSnapshot(CompiledAssemblySet set,
+            ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration = null,
+            IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null,
+            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null)
+        {
+            return ValidateCompiledInternal(set, policy, utcNow, acquisitionConfiguration, fixedImageEvidence,
+                null, rawTypeAdmissionConfiguration, true);
+        }
+
+        private static ShadowPolicyValidationResult ValidateCompiledInternal(CompiledAssemblySet set,
+            ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration,
+            IReadOnlyDictionary<string, byte[]> fixedImageEvidence, VerifiedLinkedRuntimeReferences linkedRuntimeReferences,
+            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration, bool compilerSnapshot)
+        {
             if (set == null)
             {
                 var missing = new ShadowPolicyValidationResult();
@@ -98,11 +122,13 @@ namespace HybridCLR.Editor.AssemblyShadow
             var bindingErrors = new ShadowPolicyValidationResult();
             var bindings = VerifyAcquisitions(set, policy, acquisitionConfiguration, fixedImageEvidence, bindingErrors);
             var rawAdmissions = VerifyRawTypeAdmissions(set, rawTypeAdmissionConfiguration, bindingErrors);
+            HashSet<string> reflectionScope = compilerSnapshot ? CompilerReflectionScope(set, policy, bindings, rawAdmissions) : null;
             var definitions = new List<AssemblyPolicyDefinition>();
             foreach (KeyValuePair<string, AssemblyDescriptor> pair in set.Assemblies)
             {
                 AssemblyPolicyDefinition definition = FromDescriptor(pair.Value);
-                if (IsRuntime(definition)) ReflectionDependencyScanner.ScanVerified(set.Modules, pair.Key, definition, bindings, rawAdmissions);
+                if (IsRuntime(definition) && (reflectionScope == null || reflectionScope.Contains(AssemblyIdentityUtil.CanonicalName(pair.Key))))
+                    ReflectionDependencyScanner.ScanVerified(set.Modules, pair.Key, definition, bindings, rawAdmissions);
                 definitions.Add(definition);
             }
             // Resolver modules are evidence for references, not missing Player
@@ -133,6 +159,59 @@ namespace HybridCLR.Editor.AssemblyShadow
             foreach (var error in bindingErrors.Diagnostics) result.Error(error.code, error.message);
             foreach (var error in ShadowExecutionPolicy.ValidateCompiled(set, policy).Diagnostics) result.Error(error.code, error.message);
             return result;
+        }
+
+        private static HashSet<string> CompilerReflectionScope(CompiledAssemblySet set, ShadowPolicyConfiguration policy,
+            IEnumerable<VerifiedReflectionBinding> bindings, IEnumerable<VerifiedRawTypeAdmission> rawAdmissions)
+        {
+            var runtime = new HashSet<string>(set.Assemblies.Values.Where(descriptor =>
+                descriptor.classification == AssemblyClassification.Runtime || descriptor.classification == AssemblyClassification.NormalHotUpdate)
+                .Select(descriptor => AssemblyIdentityUtil.CanonicalName(descriptor.name)), StringComparer.Ordinal);
+            var scope = new HashSet<string>(StringComparer.Ordinal);
+            foreach (AssemblyDescriptor descriptor in set.Assemblies.Values)
+                if (descriptor.isShadowCapable || descriptor.isBootstrap || descriptor.classification == AssemblyClassification.NormalHotUpdate)
+                    scope.Add(AssemblyIdentityUtil.CanonicalName(descriptor.name));
+            foreach (AssemblyCapability capability in (policy == null ? null : policy.assemblies) ?? new AssemblyCapability[0])
+                if (capability != null && (capability.isShadowCapable || capability.isBootstrap ||
+                    capability.classification == AssemblyClassification.NormalHotUpdate))
+                    scope.Add(AssemblyIdentityUtil.CanonicalName(capability.name));
+            foreach (VerifiedReflectionBinding binding in bindings ?? new VerifiedReflectionBinding[0])
+                scope.Add(AssemblyIdentityUtil.CanonicalName(binding.Assembly));
+            foreach (VerifiedRawTypeAdmission admission in rawAdmissions ?? new VerifiedRawTypeAdmission[0])
+                scope.Add(AssemblyIdentityUtil.CanonicalName(new AssemblyNameInfo(admission.ConsumerAssemblyIdentity).Name.String));
+            if (policy != null)
+            {
+                foreach (ShadowReflectionBindingDeclaration binding in policy.reflectionBindings ?? new ShadowReflectionBindingDeclaration[0])
+                    if (binding != null) scope.Add(AssemblyIdentityUtil.CanonicalName(binding.consumer));
+                if (policy.dependencies != null)
+                {
+                    foreach (DeclaredRuntimeDependency edge in policy.dependencies.runtimeDependencies ?? new DeclaredRuntimeDependency[0])
+                        if (edge != null) { scope.Add(AssemblyIdentityUtil.CanonicalName(edge.consumer)); scope.Add(AssemblyIdentityUtil.CanonicalName(edge.provider)); }
+                    foreach (BootstrapEntrypointDeclaration edge in policy.dependencies.bootstrapEntrypoints ?? new BootstrapEntrypointDeclaration[0])
+                        if (edge != null) { scope.Add(AssemblyIdentityUtil.CanonicalName(edge.consumer)); scope.Add(AssemblyIdentityUtil.CanonicalName(edge.provider)); }
+                }
+            }
+            scope.IntersectWith(runtime);
+            // Without a shadow-policy anchor this API must not become a generic
+            // escape hatch; preserve the strict full-snapshot behavior.
+            if (scope.Count == 0) return runtime;
+            bool changed;
+            do
+            {
+                changed = false;
+                foreach (AssemblyDescriptor descriptor in set.Assemblies.Values)
+                {
+                    string consumer = AssemblyIdentityUtil.CanonicalName(descriptor.name);
+                    if (!runtime.Contains(consumer)) continue;
+                    foreach (string rawProvider in descriptor.references ?? new string[0])
+                    {
+                        string provider = AssemblyIdentityUtil.CanonicalName(rawProvider);
+                        if (!runtime.Contains(provider) || (!scope.Contains(consumer) && !scope.Contains(provider))) continue;
+                        changed |= scope.Add(consumer); changed |= scope.Add(provider);
+                    }
+                }
+            } while (changed);
+            return scope;
         }
 
         private static VerifiedRawTypeAdmission[] VerifyRawTypeAdmissions(CompiledAssemblySet set,

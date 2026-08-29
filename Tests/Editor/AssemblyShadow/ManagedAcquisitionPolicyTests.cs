@@ -202,6 +202,31 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
         }
 
+        [Test] public void CompilerSnapshotDefersOnlyDisconnectedRuntimeAcquisitionsUntilStrictPlayerValidation()
+        {
+            using (var fixture = Fixture.Create("GetTypes"))
+            {
+                StringAssert.Contains("UnboundedManagedAcquisition", fixture.Validate().ToString(), "Strict Player validation remains complete.");
+                Assert.IsTrue(fixture.ValidateCompilerSnapshot().IsValid, fixture.ValidateCompilerSnapshot().ToString());
+
+                fixture.Set.Get("Consumer").references = new[] { "Image" };
+                StringAssert.Contains("UnboundedManagedAcquisition", fixture.ValidateCompilerSnapshot().ToString(), "Consumers of a policy anchor are in scope.");
+
+                fixture.Set.Get("Consumer").references = new string[0];
+                fixture.Set.Get("Image").references = new[] { "Consumer" };
+                StringAssert.Contains("UnboundedManagedAcquisition", fixture.ValidateCompilerSnapshot().ToString(), "Dependencies of a policy anchor are in scope.");
+            }
+        }
+
+        [Test] public void CompilerSnapshotWithoutAnyPolicyAnchorFallsBackToStrictReflectionScanning()
+        {
+            using (var fixture = Fixture.Create("GetTypes"))
+            {
+                fixture.Set.Get("Image").classification = AssemblyClassification.BuildFiltered;
+                StringAssert.Contains("UnboundedManagedAcquisition", fixture.ValidateCompilerSnapshot().ToString());
+            }
+        }
+
         private sealed class Fixture : IDisposable
         {
             internal byte[] ConsumerBytes, ImageBytes;
@@ -212,6 +237,8 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             internal Dictionary<string, byte[]> Images() { return new Dictionary<string, byte[]> { { Configuration.sites[0].imagePath, ImageBytes } }; }
             internal ShadowPolicyValidationResult Validate(ReflectionBindingConfiguration configuration = null, IReadOnlyDictionary<string, byte[]> images = null)
             { return ShadowAssemblyPolicyValidator.ValidateCompiled(Set, Policy, DateTime.UtcNow, configuration, images); }
+            internal ShadowPolicyValidationResult ValidateCompilerSnapshot()
+            { return ShadowAssemblyPolicyValidator.ValidateCompilerSnapshot(Set, Policy, DateTime.UtcNow); }
             internal AssemblyPolicyDefinition Scan()
             {
                 var definition = new AssemblyPolicyDefinition { name = "Consumer" };

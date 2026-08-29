@@ -185,6 +185,18 @@ namespace HybridCLR.Editor.AssemblyShadow
                 configuration, ReadFixedImages(root, configuration), linkedRuntimeReferences, rawConfiguration);
         }
 
+        public static ShadowPolicyValidationResult ValidateCompilerSnapshot(CompiledAssemblySet set, ShadowPolicyConfiguration policy,
+            string root, AssemblySnapshotReceipt receipt)
+        {
+            ShadowHash.Require(receipt != null && receipt.kind == "CompilerOutput" && receipt.linkedPlayerReceipt == null,
+                "CompilerSnapshotRequired", "Provisional validation requires compiler output before any Player linkage claim.");
+            RequirePolicy(policy, root, receipt, false);
+            var configuration = ReadAndVerify(root, receipt, false);
+            var rawConfiguration = ShadowRawTypeAdmissionEvidence.ReadAndVerify(root, receipt, false);
+            return ShadowAssemblyPolicyValidator.ValidateCompilerSnapshot(set, policy, DateTime.UtcNow,
+                configuration, ReadFixedImages(root, configuration), rawConfiguration);
+        }
+
         public static void Copy(string source, string destination, AssemblySnapshotReceipt receipt)
         {
             ShadowRawTypeAdmissionEvidence.Copy(source, destination, receipt);
