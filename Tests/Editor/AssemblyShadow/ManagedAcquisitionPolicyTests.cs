@@ -227,6 +227,18 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
         }
 
+        [Test] public void CompilerSnapshotDoesNotCrossSharedDependenciesIntoSiblingRuntimePackages()
+        {
+            using (var fixture = Fixture.Create("GetTypes"))
+            {
+                fixture.AddEmptyRuntime("Shared");
+                fixture.Set.Get("Image").references = new[] { "Shared" };
+                fixture.Set.Get("Consumer").references = new[] { "Shared" };
+                StringAssert.Contains("UnboundedManagedAcquisition", fixture.Validate().ToString());
+                Assert.IsTrue(fixture.ValidateCompilerSnapshot().IsValid, fixture.ValidateCompilerSnapshot().ToString());
+            }
+        }
+
         private sealed class Fixture : IDisposable
         {
             internal byte[] ConsumerBytes, ImageBytes;
@@ -239,6 +251,15 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             { return ShadowAssemblyPolicyValidator.ValidateCompiled(Set, Policy, DateTime.UtcNow, configuration, images); }
             internal ShadowPolicyValidationResult ValidateCompilerSnapshot()
             { return ShadowAssemblyPolicyValidator.ValidateCompilerSnapshot(Set, Policy, DateTime.UtcNow); }
+            internal void AddEmptyRuntime(string name)
+            {
+                byte[] bytes;
+                using (var module = NewModule(name)) using (var stream = new MemoryStream())
+                { module.Write(stream); bytes = stream.ToArray(); }
+                ((Dictionary<string, ModuleDefMD>)Set.Modules).Add(name, ModuleDefMD.Load(bytes));
+                ((Dictionary<string, AssemblyDescriptor>)Set.Assemblies).Add(name, new AssemblyDescriptor {
+                    name = name, classification = AssemblyClassification.Runtime, references = new string[0] });
+            }
             internal AssemblyPolicyDefinition Scan()
             {
                 var definition = new AssemblyPolicyDefinition { name = "Consumer" };

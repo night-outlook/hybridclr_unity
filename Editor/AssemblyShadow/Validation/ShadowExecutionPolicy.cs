@@ -98,7 +98,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                     {
                         if (candidate && HasAttribute(method.CustomAttributes, "UnityEngine.RuntimeInitializeOnLoadMethodAttribute"))
                             Error("CandidateRuntimeInitialize", type, method, -1, "Unity startup callback can execute before shadow publication.");
-                        else if (HasAttribute(method.CustomAttributes, "UnityEngine.RuntimeInitializeOnLoadMethodAttribute"))
+                        else if (candidateDependent.Contains(module.Assembly.Name.String) &&
+                            HasAttribute(method.CustomAttributes, "UnityEngine.RuntimeInitializeOnLoadMethodAttribute"))
                             ScanReachable(method, (body, instruction, index) =>
                             {
                                 if (candidates.Contains(body.Module.Assembly.Name.String) || OperandHasCandidate(instruction.Operand))
@@ -115,7 +116,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                             Error("BootstrapCandidateGeneric", type, method, -1, "Fixed Bootstrap closes a generic over a concrete candidate type.");
                         if (HasAttribute(method.CustomAttributes, "Unity.Burst.BurstCompileAttribute") && (candidate || MethodSignatures(method).Any(ContainsCandidateShape)))
                             Error("BurstCandidateExecution", type, method, -1, "Burst method is a candidate definition or has a concrete candidate signature.");
-                        if (burstType || HasAttribute(method.CustomAttributes, "Unity.Burst.BurstCompileAttribute"))
+                        if (candidateDependent.Contains(module.Assembly.Name.String) &&
+                            (burstType || HasAttribute(method.CustomAttributes, "Unity.Burst.BurstCompileAttribute")))
                             ScanReachable(method, (body, instruction, index) =>
                             {
                                 if (candidates.Contains(body.Module.Assembly.Name.String) || MethodSignatures(body).Any(ContainsCandidateShape) || OperandHasCandidate(instruction.Operand))

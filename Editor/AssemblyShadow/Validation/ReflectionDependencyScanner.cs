@@ -99,8 +99,9 @@ namespace HybridCLR.Editor.AssemblyShadow
                     string callSite = type.FullName + "::" + method.Name;
                     string original;
                     if (method.Name == "MoveNext" && stateMachines.TryGetValue(type.FullName, out original)) callSite = original;
-                    var freshNames = FindFreshAssemblyNames(method, modules);
-                    State[] states = Analyze(method, fixedGuards, freshNames, modules);
+                    bool needsValueAnalysis = NeedsValueAnalysis(method);
+                    var freshNames = needsValueAnalysis ? FindFreshAssemblyNames(method, modules) : new Dictionary<Instruction, string>();
+                    State[] states = needsValueAnalysis ? Analyze(method, fixedGuards, freshNames, modules) : null;
                     for (int index = 0; index < method.Body.Instructions.Count; ++index)
                     {
                         Instruction instruction = method.Body.Instructions[index];
@@ -161,7 +162,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                         string kind;
                         int argumentIndex;
                         if (!IsReflectionCall(called, out kind, out argumentIndex)) continue;
-                        State input = states[index];
+                        State input = states == null ? null : states[index];
                         Value argument = Argument(input, called, argumentIndex);
                         string freshName;
                         if (kind == "Assembly.Load" && input != null && !input.invalid && freshNames.TryGetValue(instruction, out freshName))
@@ -211,6 +212,17 @@ namespace HybridCLR.Editor.AssemblyShadow
                 .Select(group => group.First()).ToArray();
             definition.unknownReflectionCallSites = unknown.OrderBy(value => value, StringComparer.Ordinal).ToArray();
             definition.managedAcquisitions = acquisitions.ToArray();
+        }
+
+        private static bool NeedsValueAnalysis(MethodDef method)
+        {
+            foreach (Instruction instruction in method.Body.Instructions)
+            {
+                if (instruction.OpCode.Code != Code.Call && instruction.OpCode.Code != Code.Callvirt) continue;
+                string kind; int argument;
+                if (IsReflectionCall(instruction.Operand as IMethod, out kind, out argument)) return true;
+            }
+            return false;
         }
 
         private static ManagedAcquisitionEvidence Acquisition(MethodDef method, IMethod called, string callSite, int index,

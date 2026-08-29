@@ -168,6 +168,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 descriptor.classification == AssemblyClassification.Runtime || descriptor.classification == AssemblyClassification.NormalHotUpdate)
                 .Select(descriptor => AssemblyIdentityUtil.CanonicalName(descriptor.name)), StringComparer.Ordinal);
             var scope = new HashSet<string>(StringComparer.Ordinal);
+            var dynamicEdges = new List<KeyValuePair<string, string>>();
             foreach (AssemblyDescriptor descriptor in set.Assemblies.Values)
                 if (descriptor.isShadowCapable || descriptor.isBootstrap || descriptor.classification == AssemblyClassification.NormalHotUpdate)
                     scope.Add(AssemblyIdentityUtil.CanonicalName(descriptor.name));
@@ -176,13 +177,20 @@ namespace HybridCLR.Editor.AssemblyShadow
                     capability.classification == AssemblyClassification.NormalHotUpdate))
                     scope.Add(AssemblyIdentityUtil.CanonicalName(capability.name));
             foreach (VerifiedReflectionBinding binding in bindings ?? new VerifiedReflectionBinding[0])
-                scope.Add(AssemblyIdentityUtil.CanonicalName(binding.Assembly));
+                foreach (string provider in binding.Providers)
+                    dynamicEdges.Add(new KeyValuePair<string, string>(AssemblyIdentityUtil.CanonicalName(binding.Assembly),
+                        AssemblyIdentityUtil.CanonicalName(provider)));
             foreach (VerifiedRawTypeAdmission admission in rawAdmissions ?? new VerifiedRawTypeAdmission[0])
-                scope.Add(AssemblyIdentityUtil.CanonicalName(new AssemblyNameInfo(admission.ConsumerAssemblyIdentity).Name.String));
+                dynamicEdges.Add(new KeyValuePair<string, string>(
+                    AssemblyIdentityUtil.CanonicalName(new AssemblyNameInfo(admission.ConsumerAssemblyIdentity).Name.String),
+                    AssemblyIdentityUtil.CanonicalName(new AssemblyNameInfo(admission.ProviderAssemblyIdentity).Name.String)));
             if (policy != null)
             {
                 foreach (ShadowReflectionBindingDeclaration binding in policy.reflectionBindings ?? new ShadowReflectionBindingDeclaration[0])
-                    if (binding != null) scope.Add(AssemblyIdentityUtil.CanonicalName(binding.consumer));
+                    if (binding != null)
+                        foreach (string provider in binding.providers ?? new string[0])
+                            dynamicEdges.Add(new KeyValuePair<string, string>(AssemblyIdentityUtil.CanonicalName(binding.consumer),
+                                AssemblyIdentityUtil.CanonicalName(provider)));
                 if (policy.dependencies != null)
                 {
                     foreach (DeclaredRuntimeDependency edge in policy.dependencies.runtimeDependencies ?? new DeclaredRuntimeDependency[0])
@@ -195,19 +203,43 @@ namespace HybridCLR.Editor.AssemblyShadow
             // Without a shadow-policy anchor this API must not become a generic
             // escape hatch; preserve the strict full-snapshot behavior.
             if (scope.Count == 0) return runtime;
-            bool changed;
+            // First include every runtime consumer that can reach an anchor.
+            // A verified dynamic consumer joins only when its provider is on
+            // that candidate-facing graph. Then include the dependencies those
+            // consumers can call. Never reverse-walk again from a shared
+            // dependency into unrelated sibling packages.
+            bool changed, promoted;
+            do
+            {
+                do
+                {
+                    changed = false;
+                    foreach (AssemblyDescriptor descriptor in set.Assemblies.Values)
+                    {
+                        string consumer = AssemblyIdentityUtil.CanonicalName(descriptor.name);
+                        if (!runtime.Contains(consumer)) continue;
+                        foreach (string rawProvider in descriptor.references ?? new string[0])
+                        {
+                            string provider = AssemblyIdentityUtil.CanonicalName(rawProvider);
+                            if (runtime.Contains(provider) && scope.Contains(provider)) changed |= scope.Add(consumer);
+                        }
+                    }
+                } while (changed);
+                promoted = false;
+                foreach (var edge in dynamicEdges)
+                    if (runtime.Contains(edge.Key) && scope.Contains(edge.Value)) promoted |= scope.Add(edge.Key);
+            } while (promoted);
             do
             {
                 changed = false;
                 foreach (AssemblyDescriptor descriptor in set.Assemblies.Values)
                 {
                     string consumer = AssemblyIdentityUtil.CanonicalName(descriptor.name);
-                    if (!runtime.Contains(consumer)) continue;
+                    if (!runtime.Contains(consumer) || !scope.Contains(consumer)) continue;
                     foreach (string rawProvider in descriptor.references ?? new string[0])
                     {
                         string provider = AssemblyIdentityUtil.CanonicalName(rawProvider);
-                        if (!runtime.Contains(provider) || (!scope.Contains(consumer) && !scope.Contains(provider))) continue;
-                        changed |= scope.Add(consumer); changed |= scope.Add(provider);
+                        if (runtime.Contains(provider)) changed |= scope.Add(provider);
                     }
                 }
             } while (changed);
