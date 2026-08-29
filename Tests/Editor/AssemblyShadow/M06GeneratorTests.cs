@@ -181,6 +181,18 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
         }
 
+        [Test] public void SnapshotCatalogNormalizesAbsentPdbFields()
+        {
+            var file = new SnapshotFile { name = "Fixture", path = "References/Fixture.dll", sourcePath = "/source/Fixture.dll",
+                sha256 = "dll-hash", pdbPath = string.Empty, pdbSha256 = string.Empty };
+            var image = new GenerationImage { name = "Fixture", role = "Reference", path = "Snapshot/References/Fixture.dll",
+                sourcePath = file.sourcePath, sha256 = file.sha256, pdbPath = null, pdbSha256 = null };
+            MethodInfo matches = typeof(ShadowGenerationPlan).GetMethod("MatchesSnapshotImage", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.IsTrue((bool)matches.Invoke(null, new object[] { image, file, false }));
+            image.pdbSha256 = string.Empty;
+            Assert.IsFalse((bool)matches.Invoke(null, new object[] { image, file, false }));
+        }
+
         [Test] public void CanonicalWireRejectsUnknownDuplicateAndMissingFields()
         {
             using (var fixture = new Fixture())

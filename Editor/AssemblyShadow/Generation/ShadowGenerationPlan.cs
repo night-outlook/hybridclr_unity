@@ -161,9 +161,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                     else
                     {
                         SnapshotFile file = originals[key];
-                        ShadowHash.Require(image.role == (set.Assemblies.ContainsKey(key) ? "Compiler" : "Reference") &&
-                            image.path == "Snapshot/" + file.path && image.sourcePath == file.sourcePath && image.sha256 == file.sha256 && image.pdbSha256 == file.pdbSha256 &&
-                            image.pdbPath == (string.IsNullOrEmpty(file.pdbPath) ? null : "Snapshot/" + file.pdbPath), "GenerationCatalog", key);
+                        ShadowHash.Require(MatchesSnapshotImage(image, file, set.Assemblies.ContainsKey(key)), "GenerationCatalog", key);
                     }
                 }
                 foreach (var image in receipt.images)
@@ -180,6 +178,15 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             string snapshotRoot = Path.Combine(root, "Snapshot");
             return ShadowBaselineManifestBuilder.LoadSnapshot(snapshotRoot, policy, AssemblySnapshot.ReadAndVerify(snapshotRoot, false));
+        }
+
+        private static bool MatchesSnapshotImage(GenerationImage image, SnapshotFile file, bool compiler)
+        {
+            bool hasPdb = !string.IsNullOrEmpty(file.pdbPath);
+            return image.role == (compiler ? "Compiler" : "Reference") &&
+                image.path == "Snapshot/" + file.path && image.sourcePath == file.sourcePath && image.sha256 == file.sha256 &&
+                image.pdbPath == (hasPdb ? "Snapshot/" + file.pdbPath : null) &&
+                image.pdbSha256 == (hasPdb ? file.pdbSha256 : null);
         }
         private static void RequireOrdinaryCoverage(CompiledAssemblySet set, string[] ordinary)
         {
