@@ -188,7 +188,7 @@ namespace HybridCLR.Editor.AssemblyShadow
         public static ShadowPolicyValidationResult ValidateCompilerSnapshot(CompiledAssemblySet set, ShadowPolicyConfiguration policy,
             string root, AssemblySnapshotReceipt receipt)
         {
-            ShadowHash.Require(receipt != null && receipt.kind == "CompilerOutput" && receipt.linkedPlayerReceipt == null,
+            ShadowHash.Require(receipt != null && receipt.kind == "CompilePlayerScripts" && receipt.linkedPlayerReceipt == null,
                 "CompilerSnapshotRequired", "Provisional validation requires compiler output before any Player linkage claim.");
             RequirePolicy(policy, root, receipt, false);
             var configuration = ReadAndVerify(root, receipt, false);
