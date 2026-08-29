@@ -5,6 +5,8 @@ using System.Collections.Generic;
 using System.Reflection;
 using UnityEditor;
 using UnityEngine;
+using System.Linq;
+using HybridCLR.Editor.AssemblyShadow;
 
 namespace HybridCLR.Editor.Commands
 {
@@ -12,6 +14,21 @@ namespace HybridCLR.Editor.Commands
 
     public static class LinkGeneratorCommand
     {
+        public static ShadowGenerationOutput GenerateLinkXml(VerifiedGenerationPlan plan, string outputFile)
+        {
+            plan.VerifyUnchanged(); ShadowGenerationOutput.NewOutput(outputFile);
+            using (var resolver = plan.CreateResolver())
+            {
+                var names = plan.SelectedNames.ToList();
+                var types = new Analyzer(resolver).CollectRefs(names);
+                new LinkXmlWriter().Write(outputFile, types);
+                return ShadowGenerationOutput.Seal(outputFile, plan, null, new ShadowGenerationOutputReceipt
+                {
+                    stage = "Link", collectorRoots = names.ToArray(), resolverCatalog = resolver.Catalog.ToArray(),
+                    collectorTypes = GenerationSignatures.Sorted(types.Select(type => type.DefinitionAssembly.FullName + "|" + type.FullName))
+                });
+            }
+        }
 
         [MenuItem("HybridCLR/Generate/LinkXml", priority = 100)]
         public static void GenerateLinkXml()

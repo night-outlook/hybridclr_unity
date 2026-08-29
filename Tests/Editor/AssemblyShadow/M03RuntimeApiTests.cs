@@ -25,7 +25,8 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         public void ContractEnumsAndAbiAreStable()
         {
             Assert.That(Enum.GetValues(typeof(AssemblyShadowErrorCode)).Cast<AssemblyShadowErrorCode>().Select(value => (int)value).ToArray(),
-                Is.EqualTo(Enumerable.Range(0, 21).ToArray()));
+                Is.EqualTo(Enumerable.Range(0, 22).ToArray()));
+            Assert.That((int)AssemblyShadowErrorCode.BaselineMethodExecution, Is.EqualTo(21));
             Assert.That((int)AssemblyShadowState.Disabled, Is.EqualTo(0));
             Assert.That((int)AssemblyShadowState.FailedAfterCommit, Is.EqualTo(9));
             Assert.That((int)AssemblyExecutionMode.AotBaseline, Is.EqualTo(0));

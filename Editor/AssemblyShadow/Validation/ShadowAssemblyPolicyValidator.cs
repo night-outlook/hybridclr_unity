@@ -131,6 +131,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             }
             var result = ValidateDefinitionsInternal(definitions, policy, utcNow, removedReferences);
             foreach (var error in bindingErrors.Diagnostics) result.Error(error.code, error.message);
+            foreach (var error in ShadowExecutionPolicy.ValidateCompiled(set, policy).Diagnostics) result.Error(error.code, error.message);
             return result;
         }
 

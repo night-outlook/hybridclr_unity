@@ -9,6 +9,17 @@ namespace HybridCLR.Editor.AssemblyShadow
     {
         public static ShadowPatchManifest Build(ShadowPatchBuildRequest request)
         {
+            return (ShadowPatchManifest)BuildCore(request, null);
+        }
+
+        public static ShadowPatchManifestV2 BuildWithWarmup(ShadowPatchBuildRequest request, ShadowWarmupPlan warmup)
+        {
+            ShadowHash.Require(warmup != null, "WarmupPlan", "Schema 2 requires an explicit nonnull warmup plan.");
+            return (ShadowPatchManifestV2)BuildCore(request, warmup);
+        }
+
+        private static object BuildCore(ShadowPatchBuildRequest request, ShadowWarmupPlan warmup)
+        {
             ShadowHash.Require(request != null && request.policy != null && !string.IsNullOrWhiteSpace(request.patchId), "InvalidPatchRequest", "Patch ID and policy are required.");
             var baseline = ShadowArtifactWriter.ReadVerifiedManifest<ShadowBaselineManifest>(request.baselineManifestPath);
             ShadowHash.Require(baseline.schemaVersion == 1 && baseline.semanticHashSchema == 1, "ManifestSchema", request.baselineManifestPath);
@@ -59,6 +70,9 @@ namespace HybridCLR.Editor.AssemblyShadow
                 // Analysis-only/rebuild manifests may still be produced for review.
                 ShadowHash.Require(!request.dllOnly || (!diff.RequiresResourceRebuild && !index.hasUnknown), "ResourceRebuildRequired",
                     "DLL-only rejected. Affected bundles: " + string.Join(", ", affected) + ". " + string.Join("; ", diff.reasons));
+                // Warmup never authorizes a patch. It is checked only after the
+                // complete existing policy/resource proof, before any output.
+                var verifiedWarmup = warmup == null ? null : ShadowWarmupValidator.ValidateAndClone(warmup, set, closure);
                 string temporary = ShadowArtifactWriter.Begin(request.outputDirectory);
                 var entries = closure.Select(name =>
                 {
@@ -88,14 +102,20 @@ namespace HybridCLR.Editor.AssemblyShadow
                     dllOnly = request.dllOnly, resourceBundlesRequired = affected, resourceChangeReasons = diff.reasons,
                     changedRoots = roots, loadOrder = order, closure = entries, dependencyGraph = graph.Edges, deferredFacadeReferences = set.DeferredFacadeReferences.ToArray(),
                 };
-                ShadowArtifactWriter.Json(temporary, "patch-manifest.json", manifest);
+                object wireManifest = SelectWireManifest(manifest, verifiedWarmup);
+                ShadowArtifactWriter.Json(temporary, "patch-manifest.json", wireManifest);
                 ShadowArtifactWriter.Json(temporary, "resource-abi.json", resourceAbi);
                 ShadowArtifactWriter.Json(temporary, "resource-abi-diff.json", diff);
                 ShadowArtifactWriter.Json(temporary, "compile-snapshot-receipt.json", receipt);
                 ShadowReflectionBindingEvidence.Copy(request.currentCompileSnapshot, temporary, receipt);
                 ShadowArtifactWriter.Finish(temporary, request.outputDirectory, "patch-manifest.json");
-                return manifest;
+                return wireManifest;
             }
+        }
+
+        internal static object SelectWireManifest(ShadowPatchManifest manifest, ShadowWarmupPlan verifiedWarmup)
+        {
+            return verifiedWarmup == null ? (object)manifest : new ShadowPatchManifestV2 { patch = manifest, warmup = verifiedWarmup };
         }
     }
 }

@@ -13,6 +13,10 @@
 #include "vm/Object.h"
 #include "vm/Class.h"
 #include "vm/ScopedThreadAttacher.h"
+#if HYBRIDCLR_ENABLE_ASSEMBLY_SHADOW
+#include "vm/AssemblyShadow.h"
+#include "utils/Runtime.h"
+#endif
 
 #include "../metadata/MetadataUtil.h"
 

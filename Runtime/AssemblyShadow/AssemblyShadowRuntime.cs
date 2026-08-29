@@ -124,5 +124,22 @@ namespace HybridCLR
         [MethodImpl(MethodImplOptions.InternalCall)]
         public static extern AssemblyShadowErrorCode GetTypeResolutionInfo(Type type, out string json);
 #endif
+
+        /// <summary>
+        /// Gets the separate schema 1 execution observations without running a
+        /// class initializer or creating a baseline class. Counts describe guard
+        /// observations, not distinct executed bodies; addresses are development
+        /// diagnostics only. Editor and Mono execution are unsupported.
+        /// </summary>
+#if UNITY_EDITOR || !ENABLE_IL2CPP
+        public static AssemblyShadowErrorCode GetExecutionDiagnosticsJson(out string json)
+        {
+            json = null;
+            throw new NotSupportedException("Assembly Shadow requires a native IL2CPP Player; Editor and Mono execution are unsupported.");
+        }
+#else
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        public static extern AssemblyShadowErrorCode GetExecutionDiagnosticsJson(out string json);
+#endif
     }
 }

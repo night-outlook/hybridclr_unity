@@ -34,11 +34,18 @@ namespace HybridCLR.Editor.AssemblyShadow
             public string postprocessBuildGuid;
             public int preprocessReportInstanceId;
             public string preprocessOutputPath;
+            public bool expectedDevelopment;
         }
         public int callbackOrder { get { return int.MaxValue; } }
 
         public static void Begin(string root, string buildId, BuildTarget target, string architecture, ShadowSourcePins pins, string[] candidates,
             string[] extraScriptingDefines = null)
+        {
+            Begin(root, buildId, target, architecture, pins, candidates, extraScriptingDefines, true);
+        }
+
+        public static void Begin(string root, string buildId, BuildTarget target, string architecture, ShadowSourcePins pins, string[] candidates,
+            string[] extraScriptingDefines, bool developmentBuild)
         {
             ShadowHash.Require(!string.IsNullOrWhiteSpace(buildId) && !Directory.Exists(root), "InvalidCapture", "A new snapshot root and build ID are required.");
             ShadowHash.Require(string.IsNullOrEmpty(SessionState.GetString(SessionKey, "")), "CaptureInProgress", "Finish or abort the preceding explicit Player capture.");
@@ -51,6 +58,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                     .Select(AssemblyIdentityUtil.CanonicalName).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(name => name, StringComparer.Ordinal).ToArray(),
                 normalHotUpdateAssemblies = NormalHotUpdateNames(), capabilities = policy.assemblies,
                 extraScriptingDefines = extraScriptingDefines ?? new string[0],
+                expectedDevelopment = developmentBuild,
             }));
         }
 
@@ -112,7 +120,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             string json = SessionState.GetString(SessionKey, "");
             if (string.IsNullOrEmpty(json)) return assemblies;
             var request = JsonUtility.FromJson<Request>(json);
-            ShadowHash.Require((buildOptions & BuildOptions.Development) != 0, "CaptureOptions", "M02 baseline and patch must use the same Development compilation mode.");
+            ShadowHash.Require(((buildOptions & BuildOptions.Development) != 0) == request.expectedDevelopment,
+                "CaptureOptions", "The actual Player compilation mode differs from the explicit capture request.");
             var target = (BuildTarget)Enum.Parse(typeof(BuildTarget), request.target);
             ShadowHash.Require(target == EditorUserBuildSettings.activeBuildTarget, "TargetMismatch", "Player capture target changed.");
             ShadowHash.Require(request.beforeFiltersCaptured && request.beforeFilters != null && !request.afterFiltersCaptured, "FilterCaptureMissing", "A unique early input capture is required before the late Player input filter.");

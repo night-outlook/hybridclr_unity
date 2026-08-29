@@ -8,12 +8,38 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
+using HybridCLR.Editor.AssemblyShadow;
 
 namespace HybridCLR.Editor.Commands
 {
     using Analyzer = HybridCLR.Editor.AOT.Analyzer;
     public static class AOTReferenceGeneratorCommand
     {
+        public static ShadowGenerationOutput GenerateAOTGenericReference(VerifiedGenerationPlan plan, VerifiedGenerationAotInputs aot,
+            string outputFile, int maxIterations = 20)
+        {
+            plan.VerifyUnchanged(); aot.VerifyUnchanged(plan); ShadowGenerationOutput.NewOutput(outputFile);
+            ShadowHash.Require(maxIterations > 0 && maxIterations <= 20, "GenerationIterations", maxIterations.ToString());
+            using (var resolver = aot.CreateResolver(plan))
+            {
+                var roots = plan.SelectedNames.ToList(); var collector = new AssemblyReferenceDeepCollector(resolver, roots); resolver.Bind(collector);
+                var analyzer = new Analyzer(new Analyzer.Options { Collector = collector, MaxIterationCount = maxIterations }); analyzer.Run();
+                new GenericReferenceWriter().Write(analyzer.AotGenericTypes.ToList(), analyzer.AotGenericMethods.ToList(), outputFile);
+                return ShadowGenerationOutput.Seal(outputFile, plan, aot, new ShadowGenerationOutputReceipt
+                {
+                    stage = "AotGenericReference", maxIterations = maxIterations, collectorRoots = roots.ToArray(), resolverCatalog = resolver.Catalog.ToArray(),
+                    collectorTypes = GenerationSignatures.Sorted(analyzer.GenericTypes.Select(type => GenerationSignatures.Type(type.ToTypeSig()))),
+                    collectorMethods = GenerationSignatures.Sorted(analyzer.GenericMethods.Select(GenerationSignatures.Method)),
+                    aotTypes = GenerationSignatures.Sorted(analyzer.AotGenericTypes.Select(type => GenerationSignatures.Type(type.ToTypeSig()))),
+                    aotMethods = GenerationSignatures.Sorted(analyzer.AotGenericMethods.Select(GenerationSignatures.Method)),
+                    // These names are executable generated data. The type and
+                    // method inventories above describe collection, not C#
+                    // executable generic instantiation (the writer uses comments).
+                    emittedAssemblyNames = analyzer.AotGenericTypes.Select(type => type.Type.Module).Concat(analyzer.AotGenericMethods.Select(method => method.Method.Module))
+                        .Distinct().Select(module => module.Name.String).OrderBy(name => name, StringComparer.Ordinal).ToArray()
+                });
+            }
+        }
 
         [MenuItem("HybridCLR/Generate/AOTGenericReference", priority = 102)]
         public static void CompileAndGenerateAOTGenericReference()

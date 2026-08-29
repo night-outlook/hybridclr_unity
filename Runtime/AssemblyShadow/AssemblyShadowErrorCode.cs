@@ -24,5 +24,6 @@ namespace HybridCLR
         AlreadyCommitted = 18,
         ModuleInitializerFailed = 19,
         InternalError = 20,
+        BaselineMethodExecution = 21,
     }
 }

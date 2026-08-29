@@ -219,6 +219,18 @@ namespace HybridCLR.Editor.AssemblyShadow
 
         public static string Compile(string root, BuildTarget target, string architecture, ShadowSourcePins pins, ShadowPolicyConfiguration policy, string[] defines)
         {
+            return CompileCore(root, target, architecture, pins, policy, defines, true, false);
+        }
+
+        public static string CompileWithOptions(string root, BuildTarget target, string architecture, ShadowSourcePins pins,
+            ShadowPolicyConfiguration policy, string[] defines, bool developmentBuild)
+        {
+            return CompileCore(root, target, architecture, pins, policy, defines, developmentBuild, true);
+        }
+
+        private static string CompileCore(string root, BuildTarget target, string architecture, ShadowSourcePins pins,
+            ShadowPolicyConfiguration policy, string[] defines, bool developmentBuild, bool captureMode)
+        {
             ShadowAssemblyPolicyValidator.ValidateBeforeCompile(policy, target).ThrowIfInvalid();
             string output = Path.Combine(root, "CompilerOutput");
             ShadowHash.Require(!Directory.Exists(root), "SnapshotExists", root);
@@ -227,7 +239,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             var settings = new ScriptCompilationSettings
             {
                 group = BuildPipeline.GetBuildTargetGroup(target), target = target,
-                options = ScriptCompilationOptions.DevelopmentBuild, extraScriptingDefines = compilationDefines,
+                options = developmentBuild ? ScriptCompilationOptions.DevelopmentBuild : ScriptCompilationOptions.None, extraScriptingDefines = compilationDefines,
             };
             var compilation = PlayerBuildInterface.CompilePlayerScripts(settings, output);
             ShadowHash.Require(compilation.assemblies != null && compilation.assemblies.Count > 0, "CompileFailed", "No Player assemblies emitted.");
@@ -242,6 +254,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             string snapshot = Path.Combine(root, "Snapshot");
             var receipt = Capture(snapshot, emitted.Concat(plugins), references, "CompilePlayerScripts", target, architecture, pins, compilationDefines);
             ShadowReflectionBindingEvidence.RequirePolicy(policy, snapshot, receipt, false);
+            if (captureMode) ShadowCompilerModeEvidence.Capture(snapshot, receipt, settings.options, developmentBuild);
             return snapshot;
         }
     }

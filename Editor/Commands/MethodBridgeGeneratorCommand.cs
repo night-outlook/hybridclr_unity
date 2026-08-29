@@ -12,12 +12,52 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.Build;
 using UnityEngine;
+using HybridCLR.Editor.AssemblyShadow;
 
 namespace HybridCLR.Editor.Commands
 {
     using Analyzer = HybridCLR.Editor.MethodBridge.Analyzer;
     public class MethodBridgeGeneratorCommand
     {
+        public static ShadowGenerationOutput GenerateMethodBridgeAndReversePInvokeWrapper(VerifiedGenerationPlan plan,
+            VerifiedGenerationAotInputs aot, string templateFile, string outputFile, bool development, int maxIterations = 20)
+        {
+            plan.VerifyUnchanged(); aot.VerifyUnchanged(plan); ShadowGenerationOutput.NewOutput(outputFile);
+            ShadowHash.Require(maxIterations > 0 && maxIterations <= 20, "GenerationIterations", maxIterations.ToString());
+            using (var resolver = aot.CreateResolver(plan))
+            {
+                var roots = aot.RootNames.Concat(plan.SelectedNames).Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal).ToList();
+                var collector = new AssemblyReferenceDeepCollector(resolver, roots); resolver.Bind(collector);
+                var analyzer = new Analyzer(new Analyzer.Options { Collector = collector, MaxIterationCount = maxIterations }); analyzer.Run();
+                var cache = new AssemblyCache(resolver);
+                foreach (string name in plan.SelectedNames) cache.LoadModule(name);
+                resolver.Bind(cache);
+                var selected = plan.SelectedNames.ToList();
+                var reverse = new MonoPInvokeCallbackAnalyzer(cache, selected); reverse.Run();
+                var calli = new CalliAnalyzer(cache, selected); calli.Run();
+                var pinvoke = new PInvokeAnalyzer(cache, selected); pinvoke.Run();
+                var native = calli.CalliMethodSignatures.Concat(pinvoke.PInvokeMethodSignatures).ToList();
+                byte[] template = File.ReadAllBytes(templateFile);
+                var generator = new Generator(new Generator.Options { TemplateCode = Encoding.UTF8.GetString(template), OutputFile = outputFile,
+                    GenericMethods = analyzer.GenericMethods, ReversePInvokeMethods = reverse.ReversePInvokeMethods,
+                    CalliMethodSignatures = native, Development = development });
+                GenerationInventory inventory = generator.Prepare(); generator.Generate();
+                return ShadowGenerationOutput.Seal(outputFile, plan, aot, new ShadowGenerationOutputReceipt
+                {
+                    stage = "MethodBridge", development = development, maxIterations = maxIterations, templateSha256 = ShadowHash.Bytes(template),
+                    collectorRoots = roots.ToArray(), resolverCatalog = resolver.Catalog.ToArray(),
+                    collectorTypes = GenerationSignatures.Sorted(analyzer.GenericTypes.Select(type => GenerationSignatures.Type(type.ToTypeSig()))),
+                    collectorMethods = GenerationSignatures.Sorted(analyzer.GenericMethods.Select(GenerationSignatures.Method)),
+                    reverseMethods = GenerationSignatures.Sorted(reverse.ReversePInvokeMethods.Select(method => GenerationSignatures.Method(new GenericMethod(method.Method, null, null)))),
+                    nativeCallSignatures = GenerationSignatures.Sorted(native.Select(method => (method.Callvention ?? method.MethodSig.CallingConvention) + "|" + GenerationSignatures.Signature(method.MethodSig))),
+                    managedToNative = ShadowGenerationOutput.Entries(inventory.ManagedToNative), nativeToManaged = ShadowGenerationOutput.Entries(inventory.NativeToManaged),
+                    adjustThunks = ShadowGenerationOutput.Entries(inventory.AdjustThunks), reversePInvoke = ShadowGenerationOutput.Entries(inventory.ReversePInvoke),
+                    calli = ShadowGenerationOutput.Entries(inventory.Calli), structMappings = ShadowGenerationOutput.Entries(inventory.StructMappings),
+                    nativePointerDispatchHasMethodInfo = inventory.NativePointerDispatchHasMethodInfo,
+                    reversePInvokeGuardPolicy = "AbortBeforeExternalDispatch"
+                });
+            }
+        }
 
         public static void CleanIl2CppBuildCache()
         {

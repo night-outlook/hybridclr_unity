@@ -34,6 +34,8 @@ namespace HybridCLR.Editor.MethodBridge
             public IReadOnlyCollection<CallNativeMethodSignatureInfo> CalliMethodSignatures { get; set; }
 
             public bool Development { get; set; }
+
+            public Action<string> Log { get; set; }
         }
 
         private class ABIReversePInvokeMethodInfo
@@ -68,6 +70,8 @@ namespace HybridCLR.Editor.MethodBridge
 
         private readonly bool _development;
 
+        private readonly Action<string> _log;
+
         private readonly TypeCreator _typeCreator;
 
         private readonly HashSet<MethodDesc> _managed2nativeMethodSet = new HashSet<MethodDesc>();
@@ -79,6 +83,8 @@ namespace HybridCLR.Editor.MethodBridge
         private List<ABIReversePInvokeMethodInfo> _reversePInvokeMethods;
 
         private List<CalliMethodInfo> _callidMethods;
+
+        private GenerationInventory _inventory;
 
         public Generator(Options options)
         {
@@ -92,6 +98,7 @@ namespace HybridCLR.Editor.MethodBridge
             _outputFile = options.OutputFile;
             _typeCreator = new TypeCreator();
             _development = options.Development;
+            _log = options.Log ?? (message => Debug.Log(message));
         }
 
         private readonly Dictionary<string, TypeInfo> _sig2Types = new Dictionary<string, TypeInfo>();
@@ -294,8 +301,8 @@ namespace HybridCLR.Editor.MethodBridge
             CheckUnique(_structTypes0.Select(t => ToFullName(t.Klass)));
             CheckUnique(_structTypes0.Select(t => t.CreateSigName()));
 
-            Debug.LogFormat("== before optimization struct:{3} managed2native:{0} native2managed:{1} adjustThunk:{2}",
-                _managed2NativeMethodList0.Count, _native2ManagedMethodList0.Count, _adjustThunkMethodList0.Count, _structTypes0.Count);
+            _log(string.Format("== before optimization struct:{3} managed2native:{0} native2managed:{1} adjustThunk:{2}",
+                _managed2NativeMethodList0.Count, _native2ManagedMethodList0.Count, _adjustThunkMethodList0.Count, _structTypes0.Count));
         }
 
         private class AnalyzeFieldInfo
@@ -675,8 +682,8 @@ namespace HybridCLR.Editor.MethodBridge
         {
             BuildAnalyzeTypeInfos();
             BuildOptimizedMethods();
-            Debug.LogFormat("== after optimization struct:{3} managed2native:{0} native2managed:{1} adjustThunk:{2}",
-                               _managed2NativeMethodList.Count, _native2ManagedMethodList.Count, _adjustThunkMethodList.Count, structTypes.Count);
+            _log(string.Format("== after optimization struct:{3} managed2native:{0} native2managed:{1} adjustThunk:{2}",
+                               _managed2NativeMethodList.Count, _native2ManagedMethodList.Count, _adjustThunkMethodList.Count, structTypes.Count));
         }
 
         private void GenerateCode()
@@ -778,13 +785,14 @@ namespace HybridCLR.Editor.MethodBridge
 {{
     il2cpp::vm::ScopedThreadAttacher _vmThreadHelper;
     const MethodInfo* method = InterpreterModule::GetMethodInfoByReversePInvokeWrapperIndex({methodIndex});
+{ReversePInvokeGuard()}
     {methodTypeDef};
     {(method.ReturnInfo.IsVoid ? "" : "return ")}((Callback)(method->methodPointerCallByInterp))({paramNameListWithoutMethodInfoStr});
 }}
         ");
                     stubCodes.Add($"\t{{\"{methodInfo.Signature}\", (Il2CppMethodPointer)__ReversePInvokeMethod_{methodIndex}}},");
                 }
-                Debug.Log($"[ReversePInvokeWrap.Generator] method:{method.MethodDef} wrapperCount:{methodInfo.Count}");
+                _log($"[ReversePInvokeWrap.Generator] method:{method.MethodDef} wrapperCount:{methodInfo.Count}");
             }
 
             lines.Add(@"
@@ -801,10 +809,47 @@ const ReversePInvokeMethodData hybridclr::interpreter::g_reversePInvokeMethodStu
 
         public void Generate()
         {
+            Prepare();
+            GenerateCode();
+        }
+
+        public GenerationInventory Prepare()
+        {
+            if (_inventory != null) return _inventory;
             PrepareMethodBridges();
             CollectTypesAndMethods();
             OptimizationTypesAndMethods();
-            GenerateCode();
+            _inventory = new GenerationInventory(
+                _managed2NativeMethodList.Select(method => new GeneratedBridgeSignature(method.CreateInvokeSigName(), Abi(method))),
+                _native2ManagedMethodList.Select(method => new GeneratedBridgeSignature(method.CreateInvokeSigName(), Abi(method))),
+                _adjustThunkMethodList.Select(method => new GeneratedBridgeSignature(method.CreateInvokeSigName(), Abi(method))),
+                _reversePInvokeMethods.Select(method => new GeneratedBridgeSignature(method.Signature, ((int)method.Callvention) + ":" + Abi(method.Method), method.Count)),
+                _callidMethods.Select(method => new GeneratedBridgeSignature(method.Signature, ((int)method.Callvention) + ":" + Abi(method.Method))),
+                _structTypes0.Select(type => new GeneratedBridgeSignature(ToFullName(type.Klass), GetOrCalculateTypeInfoSignature(type))));
+            return _inventory;
+        }
+
+        private string Abi(MethodDesc method)
+        {
+            var result = new StringBuilder("abi-layout:1;");
+            foreach (TypeInfo type in new[] { method.ReturnInfo.Type }.Concat(method.ParamInfos.Select(parameter => parameter.Type)))
+            {
+                string signature = GetOrCalculateTypeInfoSignature(type);
+                result.Append(signature.Length).Append(':').Append(signature).Append(';');
+            }
+            return result.ToString();
+        }
+
+        private static string MethodGuard(string site)
+        {
+            return "#if HYBRIDCLR_ENABLE_ASSEMBLY_SHADOW\n    il2cpp::vm::AssemblyShadow::RequireActiveMethod(method, \"Generated." + site + "\");\n#endif";
+        }
+
+        private static string ReversePInvokeGuard()
+        {
+            // An external callback has no managed exception boundary. Seal the
+            // violation and abort before dispatch; never throw across that ABI.
+            return "#if HYBRIDCLR_ENABLE_ASSEMBLY_SHADOW\n    if (!il2cpp::vm::AssemblyShadow::AssertMethodIsActive(method, \"Generated.ReversePInvoke\"))\n        il2cpp::utils::Runtime::Abort();\n#endif";
         }
 
         private void CollectStructDefs(List<MethodDesc> methods, HashSet<TypeInfo> structTypes)
@@ -837,6 +882,8 @@ const ReversePInvokeMethodData hybridclr::interpreter::g_reversePInvokeMethodStu
 
         private void CollectStructDefs(List<MethodSig> methods, HashSet<TypeInfo> structTypes)
         {
+            if (methods.Count == 0) return;
+            if (_genericMethods.Count == 0) throw new InvalidOperationException("Calli analysis requires an explicit method-bearing metadata context.");
             ICorLibTypes corLibTypes = _genericMethods[0].Method.Module.CorLibTypes;
 
             foreach (var method in methods)
@@ -1187,6 +1234,7 @@ const NativeAdjustThunkMethodInfo hybridclr::interpreter::g_adjustThunkStub[] =
             lines.Add($@"
 static void __M2N_{method.CreateCallSigName()}(const MethodInfo* method, uint16_t* argVarIndexs, StackObject* localVarBase, void* ret)
 {{
+{MethodGuard("ManagedToNative")}
     typedef {method.ReturnInfo.Type.GetTypeName()} (*NativeMethod)({paramListStr});
     {(!method.ReturnInfo.IsVoid ? $"*({method.ReturnInfo.Type.GetTypeName()}*)ret = " : "")}((NativeMethod)(method->methodPointerCallByInterp))({paramNameListStr});
 }}
@@ -1239,6 +1287,7 @@ static void __M2N_{method.CreateCallSigName()}(const MethodInfo* method, uint16_
             lines.Add($@"
 static {method.ReturnInfo.Type.GetTypeName()} __N2M_{(adjustorThunk ? "AdjustorThunk_" : "")}{method.CreateCallSigName()}({paramListStr})
 {{
+{MethodGuard(adjustorThunk ? "AdjustThunk" : "NativeToManaged")}
     {(adjustorThunk ? "__arg0 += sizeof(Il2CppObject);" : "")}
 {GenerateArgumentSizeAndOffset(method.ParamInfos)}
     StackObject args[__TOTAL_ARG_SIZE__];
