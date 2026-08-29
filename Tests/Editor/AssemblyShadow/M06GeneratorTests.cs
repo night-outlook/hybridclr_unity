@@ -145,10 +145,13 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 var physical = ProviderImage(root, "mscorlib.dll", "StrippedAot");
                 using (var resolver = Resolver(root, facade, physical))
                 {
-                    resolver.Bind(new AssemblyCache(resolver));
                     var method = typeof(GenerationAssemblyResolver).GetMethod("ResolveStrippedImplementationAssemblyNames", BindingFlags.Instance | BindingFlags.NonPublic);
                     CollectionAssert.AreEqual(new[] { "mscorlib.dll" },
                         (string[])Invoke(method, resolver, (object)new[] { "System.FacadeGeneric`1", "System.FacadeGeneric`1" }));
+                    resolver.Bind(new AssemblyCache(resolver));
+                    resolver.Bind(new AssemblyCache(resolver));
+                    CollectionAssert.AreEqual(new[] { "mscorlib.dll" },
+                        (string[])Invoke(method, resolver, (object)new[] { "System.FacadeGeneric`1" }));
                     Assert.AreEqual("GenerationAotProvider", Assert.Throws<ShadowBuildException>(() =>
                         Invoke(method, resolver, (object)new[] { "System.Missing`1" })).Code);
                 }

@@ -102,7 +102,6 @@ namespace HybridCLR.Editor.AssemblyShadow
             internal Input(string root, GenerationImage image) { this.root = root; this.image = GenerationIO.Clone(image); }
         }
         private readonly Dictionary<string, Input> inputs;
-        private readonly Dictionary<string, ModuleDefMD> boundModules = new Dictionary<string, ModuleDefMD>(StringComparer.Ordinal);
         private readonly List<ModuleDefMD> resolutionModules = new List<ModuleDefMD>();
         internal GenerationAssemblyResolver(string root, IEnumerable<GenerationImage> images) : this(images.Select(image => new Input(root, image))) { }
         internal GenerationAssemblyResolver(IEnumerable<Input> values)
@@ -120,31 +119,33 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             var resolver = new ExactResolver(); var context = cache.ModCtx;
             context.AssemblyResolver = resolver; context.Resolver = new Resolver(resolver) { ProjectWinMDRefs = false };
-            ShadowHash.Require(boundModules.Count == 0, "GenerationResolverBind", "Generation resolver may be bound only once.");
             foreach (Input input in inputs.Values)
             {
                 ModuleDefMD module;
                 if (!cache.LoadedModules.TryGetValue(input.image.name, out module))
                 { module = ModuleDefMD.Load(File.ReadAllBytes(ResolveAssembly(input.image.name, true)), context); resolutionModules.Add(module); }
-                boundModules.Add(AssemblyIdentityUtil.CanonicalName(input.image.name), module);
                 resolver.Add(module, input.image.assemblyIdentity);
             }
         }
         internal string[] ResolveStrippedImplementationAssemblyNames(IEnumerable<string> definitionTypeNames)
         {
-            ShadowHash.Require(boundModules.Count == inputs.Count, "GenerationResolverBind", "Generation resolver must be bound before resolving physical AOT providers.");
-            var result = new HashSet<string>(StringComparer.Ordinal);
-            foreach (string fullName in (definitionTypeNames ?? new string[0]).Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal))
+            var modules = inputs.Values.Where(input => input.image.role == "StrippedAot")
+                .OrderBy(input => input.image.name, StringComparer.Ordinal)
+                .Select(input => Tuple.Create(input, ModuleDefMD.Load(File.ReadAllBytes(ResolveAssembly(input.image.name, true))))).ToArray();
+            try
             {
-                ShadowHash.Require(!string.IsNullOrWhiteSpace(fullName), "GenerationAotProvider", "A collected generic definition type name is empty.");
-                var matches = inputs.Values.Where(input => input.image.role == "StrippedAot")
-                    .Select(input => new { input, module = boundModules[AssemblyIdentityUtil.CanonicalName(input.image.name)] })
-                    .Where(item => item.module.Find(fullName, false) != null).ToArray();
-                ShadowHash.Require(matches.Length == 1, "GenerationAotProvider",
-                    fullName + " must have exactly one physical stripped-AOT provider; found " + matches.Length + ".");
-                result.Add(matches[0].module.Name.String);
+                var result = new HashSet<string>(StringComparer.Ordinal);
+                foreach (string fullName in (definitionTypeNames ?? new string[0]).Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal))
+                {
+                    ShadowHash.Require(!string.IsNullOrWhiteSpace(fullName), "GenerationAotProvider", "A collected generic definition type name is empty.");
+                    var matches = modules.Where(item => item.Item2.Find(fullName, false) != null).ToArray();
+                    ShadowHash.Require(matches.Length == 1, "GenerationAotProvider",
+                        fullName + " must have exactly one physical stripped-AOT provider; found " + matches.Length + ".");
+                    result.Add(matches[0].Item2.Name.String);
+                }
+                return result.OrderBy(name => name, StringComparer.Ordinal).ToArray();
             }
-            return result.OrderBy(name => name, StringComparer.Ordinal).ToArray();
+            finally { foreach (var item in modules) item.Item2.Dispose(); }
         }
         private sealed class ExactResolver : dnlib.DotNet.IAssemblyResolver
         {
@@ -158,6 +159,6 @@ namespace HybridCLR.Editor.AssemblyShadow
                 return assemblies[assembly.FullName];
             }
         }
-        public void Dispose() { boundModules.Clear(); foreach (var module in resolutionModules) module.Dispose(); resolutionModules.Clear(); }
+        public void Dispose() { foreach (var module in resolutionModules) module.Dispose(); resolutionModules.Clear(); }
     }
 }
