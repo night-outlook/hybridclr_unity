@@ -98,6 +98,56 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             Assert.AreEqual("WrongLookupOverload", Assert.Throws<ReflectionBindingException>(() => ReflectionBindingTransformer.Transform(fixture.Pe, null, fixture.Config)).Code);
         }
 
+        [Test] public void SchemaThreeSelectsOneFullMethodVariantAndRejectsUnknownCompilerBodies()
+        {
+            var fixture = Fixture.Create(typeof(string).AssemblyQualifiedName);
+            fixture.Rewrite(method => method.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Nop)));
+            string alternateHash;
+            using (var module = ModuleDefMD.Load(fixture.Pe))
+                alternateHash = ReflectionBindingFingerprint.Compute(module.GetTypes().SelectMany(type => type.Methods).Single());
+            fixture.Config.schemaVersion = 3; fixture.Config.transformerVersion = 3; fixture.Config.sites[0].kind = "TypeGetType";
+            fixture.Config.sites[0].additionalMethodVariants = new[]
+            {
+                new ReflectionBindingMethodVariant { originalMethodHash = alternateHash, operationIndex = 2 },
+            };
+
+            var transformed = ReflectionBindingTransformer.Transform(fixture.Pe, null, fixture.Config);
+            using (var module = ModuleDefMD.Load(transformed.PeData))
+            {
+                var verified = ReflectionBindingTransformer.Verify(module, fixture.Config).Single();
+                Assert.AreEqual(2, verified.OperationIndex);
+                Assert.AreEqual(alternateHash, verified.OriginalMethodHash);
+            }
+
+            fixture.Rewrite(method => method.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Nop)));
+            Assert.AreEqual("OriginalMethodChanged", Assert.Throws<ReflectionBindingException>(() =>
+                ReflectionBindingTransformer.Transform(fixture.Pe, null, fixture.Config)).Code);
+        }
+
+        [Test] public void SchemaThreeMethodVariantsAreCanonicalHashedAndValidated()
+        {
+            var fixture = Fixture.Create(); var site = fixture.Config.sites[0];
+            fixture.Config.schemaVersion = 3; fixture.Config.transformerVersion = 3; site.kind = "TypeGetType";
+            site.additionalMethodVariants = new[]
+            {
+                new ReflectionBindingMethodVariant { originalMethodHash = new string('a', 64), operationIndex = 7 },
+                new ReflectionBindingMethodVariant { originalMethodHash = new string('b', 64), operationIndex = 9 },
+            };
+            string original = fixture.Config.ComputeHash();
+            Array.Reverse(site.additionalMethodVariants);
+            Assert.AreEqual(original, fixture.Config.ComputeHash());
+            site.additionalMethodVariants[0].operationIndex++;
+            Assert.AreNotEqual(original, fixture.Config.ComputeHash());
+            site.additionalMethodVariants[0].originalMethodHash = site.originalMethodHash;
+            Assert.AreEqual("InvalidMethodVariants", Assert.Throws<ReflectionBindingException>(() => fixture.Config.Validate()).Code);
+
+            fixture = Fixture.Create(); fixture.Config.sites[0].additionalMethodVariants = new[]
+            {
+                new ReflectionBindingMethodVariant { originalMethodHash = new string('a', 64), operationIndex = 7 },
+            };
+            Assert.AreEqual("UnexpectedMethodVariants", Assert.Throws<ReflectionBindingException>(() => fixture.Config.Validate()).Code);
+        }
+
         [Test] public void ExtraLookupFailsEvenWithUpdatedMethodFingerprint()
         {
             var fixture = Fixture.Create();

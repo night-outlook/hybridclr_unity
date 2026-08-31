@@ -24,8 +24,8 @@ namespace HybridCLR.AssemblyShadow.CodeGen
             {
                 var site = configuration.sites.Single(value => value.id == source.SiteId);
                 var original = FindMethod(linked, site);
-                BindingChecks.Require(site.operationIndex < original.Body.Instructions.Count, "MissingGuardedSite", site.id);
-                var operation = original.Body.Instructions[site.operationIndex]; var guard = operation.Operand as MethodDef;
+                BindingChecks.Require(source.OperationIndex < original.Body.Instructions.Count, "MissingGuardedSite", site.id);
+                var operation = original.Body.Instructions[source.OperationIndex]; var guard = operation.Operand as MethodDef;
                 BindingChecks.Require(operation.OpCode.Code == Code.Call && guard != null && guard.DeclaringType == original.DeclaringType &&
                     guard.Name == GuardName(site, configHash), "MissingGuardedSite", site.id);
                 BindingChecks.Require(expectedGuards.Add(guard), "AmbiguousGuard", site.id);
@@ -52,6 +52,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     }
                 result.Add(new VerifiedReflectionBinding { SiteId = source.SiteId, Assembly = source.Assembly, TypeName = source.TypeName,
                     MethodSignature = source.MethodSignature, OperationIndex = source.OperationIndex, OriginalMethod = original, GuardMethod = guard,
+                    OriginalMethodHash = source.OriginalMethodHash,
                     ConfigurationHash = source.ConfigurationHash, AllowedTypes = source.AllowedTypes, Providers = source.Providers,
                     Kind = source.Kind, ImageSha256 = source.ImageSha256, ProviderAssemblyIdentity = source.ProviderAssemblyIdentity, ImagePath = source.ImagePath,
                     LinkedProfileHash = profile.ComputeHash(), CompiledMethodHash = ReflectionBindingFingerprint.Compute(source.OriginalMethod),

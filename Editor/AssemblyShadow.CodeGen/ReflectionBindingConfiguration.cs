@@ -18,6 +18,13 @@ namespace HybridCLR.AssemblyShadow.CodeGen
     }
 
     [DataContract]
+    public sealed class ReflectionBindingMethodVariant
+    {
+        [DataMember(IsRequired = true)] public string originalMethodHash;
+        [DataMember(IsRequired = true)] public int operationIndex;
+    }
+
+    [DataContract]
     public sealed class ReflectionBindingSite
     {
         [DataMember(IsRequired = true)] public string id;
@@ -32,6 +39,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         [DataMember(EmitDefaultValue = false)] public string imageSha256;
         [DataMember(EmitDefaultValue = false)] public string providerAssemblyIdentity;
         [DataMember(EmitDefaultValue = false)] public string imagePath;
+        [DataMember(EmitDefaultValue = false)] public ReflectionBindingMethodVariant[] additionalMethodVariants;
     }
 
     [DataContract]
@@ -57,8 +65,9 @@ namespace HybridCLR.AssemblyShadow.CodeGen
 
         public void Validate()
         {
-            BindingChecks.Require(((schemaVersion == 1 && transformerVersion == 1) || (schemaVersion == 2 && transformerVersion == 2)) && sites != null && sites.Length > 0 && sites.Length <= 4096,
-                "InvalidConfiguration", "Supported matching schema/transformer versions are 1 and 2, with at least one site.");
+            BindingChecks.Require(((schemaVersion == 1 && transformerVersion == 1) || (schemaVersion == 2 && transformerVersion == 2) ||
+                (schemaVersion == 3 && transformerVersion == 3)) && sites != null && sites.Length > 0 && sites.Length <= 4096,
+                "InvalidConfiguration", "Supported matching schema/transformer versions are 1, 2 and 3, with at least one site.");
             var ids = new HashSet<string>(StringComparer.Ordinal);
             var methods = new HashSet<string>(StringComparer.Ordinal);
             foreach (var site in sites)
@@ -67,11 +76,23 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     !string.IsNullOrWhiteSpace(site.methodSignature) && BindingChecks.IsHash(site.originalMethodHash) && site.operationIndex >= 0 &&
                     site.allowedTypes != null && site.allowedTypes.Length <= 4096 && !string.IsNullOrWhiteSpace(site.reason), "InvalidSite", "Site identity, signature, hash, index, targets and reason are mandatory.");
                 BindingChecks.Require(ids.Add(site.id), "DuplicateSite", site.id);
-                BindingChecks.Require(methods.Add(site.assembly + "\n" + site.typeName + "\n" + site.methodSignature), "DuplicateMethodSite", "Version 1 permits only one lookup site per method.");
+                BindingChecks.Require(methods.Add(site.assembly + "\n" + site.typeName + "\n" + site.methodSignature), "DuplicateMethodSite", "Each configured method permits only one lookup site.");
                 string kind = KindOf(site);
-                BindingChecks.Require((schemaVersion == 1 && kind == "TypeGetType") || (schemaVersion == 2 &&
+                BindingChecks.Require((schemaVersion == 1 && kind == "TypeGetType") || (schemaVersion >= 2 &&
                     new[] { "TypeGetType", "FiniteAssemblyList", "FiniteAssemblyTypes", "FixedAssemblyBytes" }.Contains(site.kind, StringComparer.Ordinal)),
                     "InvalidAcquisitionKind", site.id);
+                var variants = new HashSet<string>(StringComparer.Ordinal) { site.originalMethodHash };
+                if (schemaVersion < 3)
+                    BindingChecks.Require(site.additionalMethodVariants == null || site.additionalMethodVariants.Length == 0,
+                        "UnexpectedMethodVariants", site.id);
+                else
+                {
+                    BindingChecks.Require(site.additionalMethodVariants != null && site.additionalMethodVariants.Length > 0 && site.additionalMethodVariants.Length <= 15,
+                        "InvalidMethodVariants", "Schema 3 requires one to fifteen additional compiler method variants: " + site.id);
+                    foreach (var variant in site.additionalMethodVariants)
+                        BindingChecks.Require(variant != null && BindingChecks.IsHash(variant.originalMethodHash) && variant.operationIndex >= 0 &&
+                            variants.Add(variant.originalMethodHash), "InvalidMethodVariants", "Method variants require unique hashes and non-negative indices: " + site.id);
+                }
                 if (kind == "FixedAssemblyBytes")
                 {
                     BindingChecks.Require(site.allowedTypes.Length == 0 && BindingChecks.IsHash(site.imageSha256) && IsSafeImagePath(site.imagePath), "InvalidFixedImage", site.id);
@@ -100,10 +121,27 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     hash.Add(site.id); hash.Add(site.assembly); hash.Add(site.typeName); hash.Add(site.methodSignature); hash.Add(site.originalMethodHash);
                     hash.Add(site.operationIndex); hash.Add(site.reason); hash.Add(site.allowedTypes.Length);
                     foreach (string target in site.allowedTypes.OrderBy(value => value, StringComparer.Ordinal)) hash.Add(target);
-                    if (schemaVersion == 2) { hash.Add(site.kind); hash.Add(site.imageSha256); hash.Add(site.providerAssemblyIdentity); hash.Add(site.imagePath); }
+                    if (schemaVersion >= 2) { hash.Add(site.kind); hash.Add(site.imageSha256); hash.Add(site.providerAssemblyIdentity); hash.Add(site.imagePath); }
+                    if (schemaVersion == 3)
+                    {
+                        var variants = site.additionalMethodVariants.OrderBy(value => value.originalMethodHash, StringComparer.Ordinal).ToArray();
+                        hash.Add(variants.Length);
+                        foreach (var variant in variants) { hash.Add(variant.originalMethodHash); hash.Add(variant.operationIndex); }
+                    }
                 }
                 return hash.Finish();
             }
+        }
+
+        internal ReflectionBindingMethodVariant[] MethodVariants(ReflectionBindingSite site)
+        {
+            BindingChecks.Require(site != null, "InvalidSite", "A reflection binding site is required.");
+            var result = new List<ReflectionBindingMethodVariant>
+            {
+                new ReflectionBindingMethodVariant { originalMethodHash = site.originalMethodHash, operationIndex = site.operationIndex },
+            };
+            if (schemaVersion == 3) result.AddRange(site.additionalMethodVariants);
+            return result.ToArray();
         }
 
         public bool Targets(string assemblyName) { Validate(); return sites.Any(site => site.assembly == assemblyName); }

@@ -18,7 +18,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
 
     public sealed class VerifiedReflectionBinding
     {
-        public string SiteId, Assembly, TypeName, MethodSignature, ConfigurationHash;
+        public string SiteId, Assembly, TypeName, MethodSignature, ConfigurationHash, OriginalMethodHash;
         public int OperationIndex;
         public string[] AllowedTypes, Providers;
         // Definitions belong to the caller-owned module supplied to Verify.
@@ -31,6 +31,13 @@ namespace HybridCLR.AssemblyShadow.CodeGen
     public static partial class ReflectionBindingTransformer
     {
         public const string GuardPrefix = "__AssemblyShadowReflectionBinding_";
+
+        private sealed class OriginalSite
+        {
+            internal ReflectionBindingSite Site;
+            internal ReflectionBindingMethodVariant Variant;
+            internal MethodDef Method;
+        }
 
         public static ReflectionTransformResult Transform(byte[] pe, byte[] pdb, ReflectionBindingConfiguration configuration)
         {
@@ -46,18 +53,13 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 Guid? originalMvid = module.Mvid;
                 string points = SequencePoints(module);
                 // Resolve and validate every source site before changing any body.
-                var originals = sites.Select(site => new { site, method = FindMethod(module, site) }).ToArray();
+                var originals = sites.Select(site => ResolveOriginalSite(module, configuration, site)).ToArray();
                 foreach (var item in originals)
                 {
-                    RequireOriginalSite(item.method, item.site);
-                    BindingChecks.Require(ReflectionBindingFingerprint.Compute(item.method) == item.site.originalMethodHash, "OriginalMethodChanged", item.site.id);
-                }
-                foreach (var item in originals)
-                {
-                    var operation = item.method.Body.Instructions[item.site.operationIndex];
+                    var operation = item.Method.Body.Instructions[item.Variant.operationIndex];
                     var lookup = (IMethod)operation.Operand;
-                    var guard = CreateGuard(module, item.site, configHash, lookup);
-                    item.method.DeclaringType.Methods.Add(guard);
+                    var guard = CreateGuard(module, item.Site, configHash, lookup);
+                    item.Method.DeclaringType.Methods.Add(guard);
                     // Same static Type(string) signature and call opcode preserve the
                     // original stack, branch target, instruction identity and PDB point.
                     operation.Operand = guard;
@@ -101,10 +103,16 @@ namespace HybridCLR.AssemblyShadow.CodeGen
             foreach (var site in sites)
             {
                 var original = FindMethod(module, site);
-                BindingChecks.Require(site.operationIndex < original.Body.Instructions.Count, "MissingGuardedSite", site.id);
-                var operation = original.Body.Instructions[site.operationIndex]; var guard = operation.Operand as MethodDef;
-                BindingChecks.Require(operation.OpCode.Code == Code.Call && guard != null && guard.DeclaringType == original.DeclaringType && guard.Name == GuardName(site, configHash),
-                    "MissingGuardedSite", site.id);
+                var variants = configuration.MethodVariants(site);
+                var guardedIndices = variants.Select(value => value.operationIndex).Distinct().Where(index =>
+                {
+                    if (index >= original.Body.Instructions.Count) return false;
+                    var candidate = original.Body.Instructions[index]; var target = candidate.Operand as MethodDef;
+                    return candidate.OpCode.Code == Code.Call && target != null && target.DeclaringType == original.DeclaringType && target.Name == GuardName(site, configHash);
+                }).ToArray();
+                BindingChecks.Require(guardedIndices.Length == 1, "MissingGuardedSite", site.id);
+                int operationIndex = guardedIndices[0];
+                var operation = original.Body.Instructions[operationIndex]; var guard = (MethodDef)operation.Operand;
                 BindingChecks.Require(expectedGuards.Add(guard), "AmbiguousGuard", site.id);
                 BindingChecks.Require(original.Body.Instructions.All(instruction => !IsSiteAcquisition(instruction.Operand as IMethod, site)), "AdditionalLookup", site.id);
                 BindingChecks.Require(guard.MethodSig != null && guard.MethodSig.Params.Count == 1, "GuardTemplateMismatch", site.id);
@@ -114,8 +122,12 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 var expected = CreateGuard(module, site, configHash, lookup);
                 BindingChecks.Require(guard.HasBody && ReflectionBindingFingerprint.Shape(guard, original.DeclaringType.FullName, -1, null) ==
                     ReflectionBindingFingerprint.Shape(expected, original.DeclaringType.FullName, -1, null), "GuardTemplateMismatch", site.id);
-                BindingChecks.Require(ReflectionBindingFingerprint.Shape(original, original.DeclaringType.FullName, site.operationIndex, lookup, null, OriginalCode(site)) == site.originalMethodHash,
-                    "OriginalMethodChanged", "Virtual restoration of the original lookup did not match: " + site.id);
+                string restoredMethodHash = ReflectionBindingFingerprint.Shape(original, original.DeclaringType.FullName,
+                    operationIndex, lookup, null, OriginalCode(site));
+                var matchingVariants = variants.Where(value => value.operationIndex == operationIndex &&
+                    restoredMethodHash == value.originalMethodHash).ToArray();
+                BindingChecks.Require(matchingVariants.Length == 1, "OriginalMethodChanged", "Virtual restoration of the original lookup did not match exactly one compiler variant: " + site.id);
+                var variant = matchingVariants[0];
                 foreach (var method in module.GetTypes().SelectMany(type => type.Methods).Where(method => method.HasBody))
                     foreach (var instruction in method.Body.Instructions)
                     {
@@ -126,7 +138,8 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     }
                 var allowed = site.allowedTypes.OrderBy(value => value, StringComparer.Ordinal).ToArray();
                 verified.Add(new VerifiedReflectionBinding { SiteId = site.id, Assembly = site.assembly, TypeName = site.typeName,
-                    MethodSignature = site.methodSignature, OperationIndex = site.operationIndex, OriginalMethod = original, GuardMethod = guard,
+                    MethodSignature = site.methodSignature, OperationIndex = operationIndex, OriginalMethodHash = variant.originalMethodHash,
+                    OriginalMethod = original, GuardMethod = guard,
                     ConfigurationHash = configHash, AllowedTypes = allowed, Providers = Providers(site), Kind = ReflectionBindingConfiguration.KindOf(site),
                     ImageSha256 = site.imageSha256, ProviderAssemblyIdentity = site.providerAssemblyIdentity, ImagePath = site.imagePath });
             }
@@ -152,14 +165,20 @@ namespace HybridCLR.AssemblyShadow.CodeGen
             return methods[0];
         }
 
-        private static void RequireOriginalSite(MethodDef method, ReflectionBindingSite site)
+        private static OriginalSite ResolveOriginalSite(ModuleDefMD module, ReflectionBindingConfiguration configuration, ReflectionBindingSite site)
         {
-            BindingChecks.Require(site.operationIndex < method.Body.Instructions.Count, "MissingLookup", site.id);
-            var operation = method.Body.Instructions[site.operationIndex];
+            var method = FindMethod(module, site);
+            string methodHash = ReflectionBindingFingerprint.Compute(method);
+            var matches = configuration.MethodVariants(site).Where(value => value.originalMethodHash == methodHash).ToArray();
+            BindingChecks.Require(matches.Length == 1, "OriginalMethodChanged", "Compiled method does not match exactly one approved compiler variant: " + site.id);
+            var variant = matches[0];
+            BindingChecks.Require(variant.operationIndex < method.Body.Instructions.Count, "MissingLookup", site.id);
+            var operation = method.Body.Instructions[variant.operationIndex];
             BindingChecks.Require(operation.OpCode.Code == OriginalCode(site) && IsExactAcquisition(operation.Operand as IMethod, method.Module, site), "WrongLookupOverload", site.id);
             BindingChecks.Require(method.Body.Instructions.Count(instruction => IsSiteAcquisition(instruction.Operand as IMethod, site)) == 1, "AdditionalLookup", site.id);
-            if (site.operationIndex > 0)
-                BindingChecks.Require(method.Body.Instructions[site.operationIndex - 1].OpCode.OpCodeType != OpCodeType.Prefix, "UnsupportedLookupPrefix", site.id);
+            if (variant.operationIndex > 0)
+                BindingChecks.Require(method.Body.Instructions[variant.operationIndex - 1].OpCode.OpCodeType != OpCodeType.Prefix, "UnsupportedLookupPrefix", site.id);
+            return new OriginalSite { Site = site, Variant = variant, Method = method };
         }
 
         private static bool IsAnyTypeLookup(IMethod method) { return method != null && method.Name == "GetType" && method.DeclaringType.FullName == "System.Type"; }
