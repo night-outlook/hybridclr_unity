@@ -169,7 +169,15 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         {
             var method = FindMethod(module, site);
             string methodHash = ReflectionBindingFingerprint.Compute(method);
-            var matches = configuration.MethodVariants(site).Where(value => value.originalMethodHash == methodHash).ToArray();
+            var variants = configuration.MethodVariants(site);
+            var matches = variants.Where(value => value.originalMethodHash == methodHash).ToArray();
+            if (matches.Length != 1)
+            {
+                bool wrongLookup = variants.Select(value => value.operationIndex).Distinct().Where(index => index < method.Body.Instructions.Count)
+                    .Select(index => method.Body.Instructions[index]).Any(candidate => candidate.OpCode.Code == OriginalCode(site) &&
+                        IsSiteAcquisition(candidate.Operand as IMethod, site) && !IsExactAcquisition(candidate.Operand as IMethod, method.Module, site));
+                BindingChecks.Require(!wrongLookup, "WrongLookupOverload", site.id);
+            }
             BindingChecks.Require(matches.Length == 1, "OriginalMethodChanged", "Compiled method does not match exactly one approved compiler variant: " + site.id);
             var variant = matches[0];
             BindingChecks.Require(variant.operationIndex < method.Body.Instructions.Count, "MissingLookup", site.id);
