@@ -91,7 +91,9 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         }
         private static object Invoke(string name, params object[] arguments)
         {
-            try { return typeof(ShadowCompilerModeEvidence).GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, arguments); }
+            MethodInfo method = typeof(ShadowCompilerModeEvidence).GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+                .Single(candidate => candidate.Name == name && candidate.GetParameters().Length == arguments.Length);
+            try { return method.Invoke(null, arguments); }
             catch (TargetInvocationException error) { throw error.InnerException; }
         }
         private sealed class Fixture : IDisposable
