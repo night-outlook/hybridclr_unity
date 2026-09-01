@@ -136,7 +136,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 ShadowHash.Require(File.Exists(file.sourcePath) && ShadowHash.File(file.sourcePath) == file.sha256,
                     "FilteredInputChanged", file.sourcePath);
             var receipt = AssemblySnapshot.Capture(request.root, assemblies, AssemblySnapshot.TargetCompilerReferences(), "PlayerBuildInputs", target,
-                request.architecture, request.pins, request.extraScriptingDefines, removed.Select(file => file.sourcePath));
+                request.architecture, request.pins, request.extraScriptingDefines, removed.Select(file => file.sourcePath), request.expectedDevelopment);
             receipt.buildId = request.buildId;
             foreach (string candidate in request.protectedAssemblies)
                 ShadowHash.Require(receipt.assemblies.Any(f => string.Equals(AssemblyIdentityUtil.CanonicalName(f.name), AssemblyIdentityUtil.CanonicalName(candidate), StringComparison.OrdinalIgnoreCase)), "CandidateFilteredOut", "Shadow candidate/bootstrap did not enter AOT Player: " + candidate);

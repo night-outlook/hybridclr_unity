@@ -22,19 +22,37 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 var parser = new RawTypeAdmissionJson(new UTF8Encoding(false, true).GetString(bytes));
                 var root = parser.Read(0) as Dictionary<string, object>; parser.Space(); parser.Check(parser.position == parser.text.Length);
                 Exact(root, "schemaVersion", "policy", "sites");
+                int schemaVersion = Get<int>(root, "schemaVersion");
                 var entries = Get<List<object>>(root, "sites");
                 var sites = new List<RawTypeAdmissionSite>();
                 foreach (object entry in entries)
                 {
                     var site = entry as Dictionary<string, object>;
-                    Exact(site, "id", "consumerAssembly", "declaringType", "methodSignature", "methodHash", "operationIndex", "operationSignature", "providerAssemblyIdentity", "typeName", "throwOnError", "ignoreCase", "reason");
+                    if (schemaVersion == 1)
+                        Exact(site, "id", "consumerAssembly", "declaringType", "methodSignature", "methodHash", "operationIndex", "operationSignature", "providerAssemblyIdentity", "typeName", "throwOnError", "ignoreCase", "reason");
+                    else if (schemaVersion == 2)
+                        Exact(site, "id", "consumerAssembly", "declaringType", "methodSignature", "compilerVariants", "operationSignature", "providerAssemblyIdentity", "typeName", "throwOnError", "ignoreCase", "reason");
+                    else BindingChecks.Require(false, "InvalidRawAdmissionJson", "Unsupported raw admission schema.");
+                    RawTypeAdmissionMethodVariant[] variants = null;
+                    if (schemaVersion == 2)
+                    {
+                        variants = Get<List<object>>(site, "compilerVariants").Select(item =>
+                        {
+                            var variant = item as Dictionary<string, object>;
+                            Exact(variant, "compilerMode", "methodHash", "operationIndex");
+                            return new RawTypeAdmissionMethodVariant { compilerMode = Get<string>(variant, "compilerMode"),
+                                methodHash = Get<string>(variant, "methodHash"), operationIndex = Get<int>(variant, "operationIndex") };
+                        }).ToArray();
+                    }
                     sites.Add(new RawTypeAdmissionSite { id = Get<string>(site, "id"), consumerAssembly = Get<string>(site, "consumerAssembly"),
-                        declaringType = Get<string>(site, "declaringType"), methodSignature = Get<string>(site, "methodSignature"), methodHash = Get<string>(site, "methodHash"),
-                        operationIndex = Get<int>(site, "operationIndex"), operationSignature = Get<string>(site, "operationSignature"),
+                        declaringType = Get<string>(site, "declaringType"), methodSignature = Get<string>(site, "methodSignature"),
+                        methodHash = schemaVersion == 1 ? Get<string>(site, "methodHash") : null,
+                        operationIndex = schemaVersion == 1 ? (int?)Get<int>(site, "operationIndex") : null, compilerVariants = variants,
+                        operationSignature = Get<string>(site, "operationSignature"),
                         providerAssemblyIdentity = Get<string>(site, "providerAssemblyIdentity"), typeName = Get<string>(site, "typeName"),
                         throwOnError = Get<bool>(site, "throwOnError"), ignoreCase = Get<bool>(site, "ignoreCase"), reason = Get<string>(site, "reason") });
                 }
-                return new RawTypeAdmissionConfiguration { schemaVersion = Get<int>(root, "schemaVersion"), policy = Get<string>(root, "policy"), sites = sites.ToArray() };
+                return new RawTypeAdmissionConfiguration { schemaVersion = schemaVersion, policy = Get<string>(root, "policy"), sites = sites.ToArray() };
             }
             catch (ReflectionBindingException) { throw; }
             catch (Exception error) { throw new ReflectionBindingException("InvalidRawAdmissionJson", error.Message); }
@@ -48,7 +66,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         private bool Take(char c) { Space(); if (position < text.Length && text[position] == c) { ++position; return true; } return false; }
         private object Read(int depth)
         {
-            Check(depth <= 4); Space(); Check(position < text.Length);
+            Check(depth <= 6); Space(); Check(position < text.Length);
             if (text[position] == '"') return String();
             if (Take('{'))
             {

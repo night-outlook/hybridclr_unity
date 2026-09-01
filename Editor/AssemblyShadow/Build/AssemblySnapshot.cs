@@ -129,7 +129,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         }
 
         public static AssemblySnapshotReceipt Capture(string root, IEnumerable<string> assemblyPaths, IEnumerable<string> referencePaths,
-            string kind, BuildTarget target, string architecture, ShadowSourcePins pins, IEnumerable<string> defines, IEnumerable<string> filteredAssemblyPaths = null)
+            string kind, BuildTarget target, string architecture, ShadowSourcePins pins, IEnumerable<string> defines,
+            IEnumerable<string> filteredAssemblyPaths = null, bool? rawAdmissionDevelopmentBuild = null)
         {
             ShadowHash.Require(!Directory.Exists(root), "SnapshotExists", "Snapshots are immutable: " + root);
             Directory.CreateDirectory(root);
@@ -144,7 +145,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 sourcePins = pins, extraScriptingDefines = ShadowHash.Sorted(defines ?? new string[0]), assemblies = assemblies, references = references, filteredAssemblies = filtered,
             };
             ShadowReflectionBindingEvidence.Capture(root, receipt);
-            ShadowRawTypeAdmissionEvidence.Capture(root, receipt);
+            ShadowRawTypeAdmissionEvidence.Capture(root, receipt, rawAdmissionDevelopmentBuild);
             receipt.snapshotHash = ComputeHash(receipt);
             WriteReceipt(root, receipt);
             return receipt;
@@ -252,7 +253,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 (a.classification == AssemblyClassification.Runtime || a.classification == AssemblyClassification.NormalHotUpdate) &&
                 AssemblyIdentityUtil.CanonicalName(a.name) == AssemblyIdentityUtil.CanonicalName(p)));
             string snapshot = Path.Combine(root, "Snapshot");
-            var receipt = Capture(snapshot, emitted.Concat(plugins), references, "CompilePlayerScripts", target, architecture, pins, compilationDefines);
+            var receipt = Capture(snapshot, emitted.Concat(plugins), references, "CompilePlayerScripts", target, architecture, pins,
+                compilationDefines, rawAdmissionDevelopmentBuild: developmentBuild);
             ShadowReflectionBindingEvidence.RequirePolicy(policy, snapshot, receipt, false);
             if (captureMode) ShadowCompilerModeEvidence.Capture(snapshot, receipt, settings.options, developmentBuild);
             return snapshot;

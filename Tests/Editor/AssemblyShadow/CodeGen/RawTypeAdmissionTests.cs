@@ -55,6 +55,9 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                     json.Replace("\"schemaVersion\":1", "\"schemaVersion\":1.0"), json.Replace("\"schemaVersion\":1", "\"schemaVersion\":01"),
                     json.Replace("\"operationIndex\":2", "\"operationIndex\":2147483648"), json + "{}" })
                     Assert.Throws<ReflectionBindingException>(() => RawTypeAdmissionConfiguration.Parse(Encoding.UTF8.GetBytes(bad)), bad);
+                fixture.Config.sites[0].operationIndex = 0;
+                string zero = Json(fixture.Config); StringAssert.Contains("\"operationIndex\":0", zero);
+                Assert.AreEqual(0, RawTypeAdmissionConfiguration.Parse(Encoding.UTF8.GetBytes(zero)).sites[0].operationIndex);
             }
         }
 
@@ -68,6 +71,48 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 byte[] raw = Encoding.UTF8.GetBytes(Json(fixture.Config)); byte[] pretty = Encoding.UTF8.GetBytes("\n" + Json(fixture.Config));
                 Assert.AreEqual(expected, RawTypeAdmissionConfiguration.Parse(pretty).ComputeHash());
                 Assert.AreNotEqual(RawTypeAdmissionDefines.Create(raw), RawTypeAdmissionDefines.Create(pretty));
+            }
+        }
+
+        [Test] public void SchemaTwoBindsEachCompilerModeToItsExactMethodHashAndOperationIndex()
+        {
+            using (var development = new Fixture())
+            using (var release = new Fixture(module =>
+            {
+                foreach (var method in module.GetTypes().SelectMany(type => type.Methods))
+                    method.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Nop));
+            }))
+            {
+                var releaseSites = release.Config.sites.ToDictionary(site => site.id, StringComparer.Ordinal);
+                foreach (var site in development.Config.sites)
+                {
+                    var other = releaseSites[site.id];
+                    site.compilerVariants = new[]
+                    {
+                        new RawTypeAdmissionMethodVariant { compilerMode = RawTypeAdmissionConfiguration.DevelopmentCompilerMode,
+                            methodHash = site.methodHash, operationIndex = site.operationIndex.Value },
+                        new RawTypeAdmissionMethodVariant { compilerMode = RawTypeAdmissionConfiguration.ReleaseCompilerMode,
+                            methodHash = other.methodHash, operationIndex = other.operationIndex.Value },
+                    };
+                    site.methodHash = null; site.operationIndex = null;
+                }
+                development.Config.schemaVersion = 2; development.Config.policy = RawTypeAdmissionConfiguration.PolicyV2;
+                development.Config.Validate();
+                var parsed = RawTypeAdmissionConfiguration.Parse(Encoding.UTF8.GetBytes(Json(development.Config)));
+                Assert.AreEqual(development.Config.ComputeHash(), parsed.ComputeHash());
+                Assert.AreEqual("RawAdmissionCompilerModeMissing", Assert.Throws<ReflectionBindingException>(() =>
+                    RawTypeAdmissionVerifier.Verify(release.Modules, development.Config)).Code);
+                Assert.AreEqual("RawAdmissionMethodHashMismatch", Assert.Throws<ReflectionBindingException>(() =>
+                    RawTypeAdmissionVerifier.Verify(release.Modules, development.Config, RawTypeAdmissionConfiguration.DevelopmentCompilerMode)).Code);
+                var proofs = RawTypeAdmissionVerifier.Verify(release.Modules, development.Config, RawTypeAdmissionConfiguration.ReleaseCompilerMode);
+                Assert.AreEqual(5, proofs.Length);
+                foreach (var proof in proofs)
+                {
+                    var selected = development.Config.MethodVariant(development.Config.sites.Single(site => site.id == proof.SiteId),
+                        RawTypeAdmissionConfiguration.ReleaseCompilerMode);
+                    Assert.AreEqual(selected.methodHash, proof.CompiledMethodHash);
+                    Assert.AreEqual(selected.operationIndex, proof.OperationIndex);
+                }
             }
         }
 

@@ -147,7 +147,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 Directory.CreateDirectory(Path.Combine(Root, ShadowRawTypeAdmissionEvidence.DirectoryName));
                 File.WriteAllBytes(Path.Combine(Root, ShadowRawTypeAdmissionEvidence.ConfigurationPath), config);
                 var derive = typeof(ShadowRawTypeAdmissionEvidence).GetMethod("Derive", BindingFlags.Static | BindingFlags.NonPublic);
-                var proof = (RawTypeAdmissionProofReceipt)derive.Invoke(null, new object[] { Root, Receipt, Configuration, ShadowHash.Bytes(config), false });
+                var proof = (RawTypeAdmissionProofReceipt)derive.Invoke(null, new object[] { Root, Receipt, Configuration, ShadowHash.Bytes(config), false, null });
                 File.WriteAllText(Path.Combine(Root, ShadowRawTypeAdmissionEvidence.CompiledProofPath), JsonUtility.ToJson(proof, true), new UTF8Encoding(false));
             }
             private SnapshotFile FileEntry(string name, string directory)

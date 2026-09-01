@@ -61,7 +61,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             return defines.Where(value => !IsControlDefine(value)).ToArray();
         }
 
-        public static void Capture(string root, AssemblySnapshotReceipt snapshot)
+        public static void Capture(string root, AssemblySnapshotReceipt snapshot, bool? developmentBuild = null)
         {
             string expectedHash;
             if (!RawTypeAdmissionDefines.TryGetEnabledHash(snapshot.extraScriptingDefines, out expectedHash))
@@ -74,7 +74,14 @@ namespace HybridCLR.Editor.AssemblyShadow
             byte[] bytes = File.ReadAllBytes(source);
             ShadowHash.Require(ShadowHash.Bytes(bytes) == expectedHash, "RawTypeAdmissionConfigurationChanged", source);
             var configuration = Parse(bytes);
-            var proof = Derive(root, snapshot, configuration, expectedHash, false);
+            string compilerMode = null;
+            if (configuration.schemaVersion == 2)
+            {
+                ShadowHash.Require(developmentBuild.HasValue, "RawTypeAdmissionCompilerModeMissing",
+                    "Schema 2 capture requires the actual CompilePlayerScripts or Player development mode.");
+                compilerMode = RawTypeAdmissionConfiguration.CompilerMode(developmentBuild.Value);
+            }
+            var proof = Derive(root, snapshot, configuration, expectedHash, false, compilerMode);
             ShadowHash.Require(!Directory.Exists(Path.Combine(root, DirectoryName)), "RawTypeAdmissionEvidenceExists", root);
             Directory.CreateDirectory(Path.Combine(root, DirectoryName));
             WriteNew(ShadowHash.SafeChild(root, ConfigurationPath), bytes);
@@ -87,7 +94,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             if (configuration == null) return;
             string rawHash;
             RawTypeAdmissionDefines.TryGetEnabledHash(player.extraScriptingDefines, out rawHash);
-            var proof = Derive(root, player, configuration, rawHash, true);
+            var proof = Derive(root, player, configuration, rawHash, true, CompilerMode(root, player, configuration));
             WriteNew(ShadowHash.SafeChild(root, LinkedProofPath), ProofBytes(proof));
             ReadAndVerify(root, player, true);
         }
@@ -105,14 +112,15 @@ namespace HybridCLR.Editor.AssemblyShadow
             byte[] bytes = File.ReadAllBytes(path);
             ShadowHash.Require(ShadowHash.Bytes(bytes) == expectedHash, "RawTypeAdmissionConfigurationChanged", path);
             var configuration = Parse(bytes);
+            string compilerMode = CompilerMode(root, snapshot, configuration);
             string[] relativePaths = requireLinked
                 ? new[] { ConfigurationPath, CompiledProofPath, LinkedProofPath }
                 : new[] { ConfigurationPath, CompiledProofPath };
             var expectedFiles = new HashSet<string>(relativePaths.Select(item => ShadowHash.SafeChild(root, item)), StringComparer.Ordinal);
             ShadowHash.Require(expectedFiles.SetEquals(Directory.GetFiles(Path.Combine(root, DirectoryName), "*", SearchOption.AllDirectories).Select(Path.GetFullPath)),
                 "UnexpectedRawTypeAdmissionEvidence", "Raw type evidence contains undeclared or missing files.");
-            RequireProof(root, CompiledProofPath, Derive(root, snapshot, configuration, expectedHash, false));
-            if (requireLinked) RequireProof(root, LinkedProofPath, Derive(root, snapshot, configuration, expectedHash, true));
+            RequireProof(root, CompiledProofPath, Derive(root, snapshot, configuration, expectedHash, false, compilerMode));
+            if (requireLinked) RequireProof(root, LinkedProofPath, Derive(root, snapshot, configuration, expectedHash, true, compilerMode));
             return configuration;
         }
 
@@ -129,7 +137,7 @@ namespace HybridCLR.Editor.AssemblyShadow
         }
 
         private static RawTypeAdmissionProofReceipt Derive(string root, AssemblySnapshotReceipt snapshot,
-            RawTypeAdmissionConfiguration configuration, string rawHash, bool linked)
+            RawTypeAdmissionConfiguration configuration, string rawHash, bool linked, string compilerMode)
         {
             using (var compiled = LoadModules(root, AssemblySnapshot.AllFiles(snapshot)))
             {
@@ -140,9 +148,9 @@ namespace HybridCLR.Editor.AssemblyShadow
                     if (linked)
                     {
                         profile = ReadCapturedProfile(root, snapshot);
-                        verified = RawTypeAdmissionVerifier.VerifyLinked(compiled.modules, actual.modules, configuration, profile);
+                        verified = RawTypeAdmissionVerifier.VerifyLinked(compiled.modules, actual.modules, configuration, profile, compilerMode);
                     }
-                    else verified = RawTypeAdmissionVerifier.Verify(compiled.modules, configuration);
+                    else verified = RawTypeAdmissionVerifier.Verify(compiled.modules, configuration, compilerMode);
                     ShadowHash.Require(verified.Length == configuration.sites.Length, "RawTypeAdmissionSiteMismatch", root);
                     var active = linked ? actual : compiled;
                     var sites = verified.OrderBy(site => site.SiteId, StringComparer.Ordinal).Select(site =>
@@ -160,17 +168,17 @@ namespace HybridCLR.Editor.AssemblyShadow
                             providerPath = currentProvider.path, providerSha256 = currentProvider.sha256,
                             providerInventoryHash = site.ProviderInventoryHash,
                             declaringType = declaration.declaringType, methodSignature = declaration.methodSignature,
-                            operationIndex = declaration.operationIndex, operationSignature = declaration.operationSignature,
+                            operationIndex = site.OperationIndex, operationSignature = declaration.operationSignature,
                             kind = site.Kind, typeName = declaration.typeName,
                             throwOnError = declaration.throwOnError, ignoreCase = declaration.ignoreCase,
-                            compiledMethodHash = declaration.methodHash,
+                            compiledMethodHash = site.CompiledMethodHash,
                             linkedMethodHash = linked ? ReflectionBindingFingerprint.Compute(site.Method) : "",
                             compiledConsumerSha256 = compilerConsumer.sha256,
                         };
                     }).ToArray();
                     return new RawTypeAdmissionProofReceipt
                     {
-                        phase = linked ? "Linked" : "Compiled", configurationSha256 = rawHash,
+                        policy = configuration.policy, phase = linked ? "Linked" : "Compiled", configurationSha256 = rawHash,
                         configurationHash = configuration.ComputeHash(), unityVersion = snapshot.unityVersion,
                         target = snapshot.target, architecture = snapshot.architecture,
                         buildGuid = linked ? snapshot.buildGuid : "",
@@ -241,6 +249,17 @@ namespace HybridCLR.Editor.AssemblyShadow
             var configuration = RawTypeAdmissionConfiguration.Parse(bytes);
             configuration.Validate();
             return configuration;
+        }
+
+        internal static string CompilerMode(string root, AssemblySnapshotReceipt snapshot, RawTypeAdmissionConfiguration configuration)
+        {
+            if (configuration == null || configuration.schemaVersion == 1) return null;
+            ShadowHash.Require(snapshot != null, "RawTypeAdmissionCompilerModeMissing", "A captured snapshot is required.");
+            if (snapshot.kind == "CompilePlayerScripts")
+                return RawTypeAdmissionConfiguration.CompilerMode(ShadowCompilerModeEvidence.ReadAndVerify(root, snapshot).developmentBuild);
+            ShadowHash.Require(snapshot.kind == "PlayerBuildInputs" && snapshot.playerBuildSucceeded,
+                "RawTypeAdmissionCompilerModeMissing", "Schema 2 requires a completed CompilePlayerScripts or Player snapshot.");
+            return RawTypeAdmissionConfiguration.CompilerMode((snapshot.playerBuildOptions & (int)UnityEditor.BuildOptions.Development) != 0);
         }
 
         private static void RequireAbsent(string root)

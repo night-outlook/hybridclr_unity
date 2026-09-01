@@ -182,7 +182,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             var configuration = ReadAndVerify(root, receipt, requireLinked);
             var rawConfiguration = ShadowRawTypeAdmissionEvidence.ReadAndVerify(root, receipt, requireLinked);
             return ShadowAssemblyPolicyValidator.ValidateCompiled(set, policy, DateTime.UtcNow,
-                configuration, ReadFixedImages(root, configuration), linkedRuntimeReferences, rawConfiguration);
+                configuration, ReadFixedImages(root, configuration), linkedRuntimeReferences, rawConfiguration,
+                ShadowRawTypeAdmissionEvidence.CompilerMode(root, receipt, rawConfiguration));
         }
 
         public static ShadowPolicyValidationResult ValidateCompilerSnapshot(CompiledAssemblySet set, ShadowPolicyConfiguration policy,
@@ -194,7 +195,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             var configuration = ReadAndVerify(root, receipt, false);
             var rawConfiguration = ShadowRawTypeAdmissionEvidence.ReadAndVerify(root, receipt, false);
             return ShadowAssemblyPolicyValidator.ValidateCompilerSnapshot(set, policy, DateTime.UtcNow,
-                configuration, ReadFixedImages(root, configuration), rawConfiguration);
+                configuration, ReadFixedImages(root, configuration), rawConfiguration,
+                ShadowRawTypeAdmissionEvidence.CompilerMode(root, receipt, rawConfiguration));
         }
 
         public static void Copy(string source, string destination, AssemblySnapshotReceipt receipt)

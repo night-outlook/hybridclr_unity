@@ -8,14 +8,23 @@ using dnlib.DotNet;
 namespace HybridCLR.AssemblyShadow.CodeGen
 {
     [DataContract]
+    public sealed class RawTypeAdmissionMethodVariant
+    {
+        [DataMember(IsRequired = true)] public string compilerMode;
+        [DataMember(IsRequired = true)] public string methodHash;
+        [DataMember(IsRequired = true)] public int operationIndex;
+    }
+
+    [DataContract]
     public sealed class RawTypeAdmissionSite
     {
         [DataMember(IsRequired = true)] public string id;
         [DataMember(IsRequired = true)] public string consumerAssembly;
         [DataMember(IsRequired = true)] public string declaringType;
         [DataMember(IsRequired = true)] public string methodSignature;
-        [DataMember(IsRequired = true)] public string methodHash;
-        [DataMember(IsRequired = true)] public int operationIndex;
+        [DataMember(EmitDefaultValue = false)] public string methodHash;
+        [DataMember(EmitDefaultValue = false)] public int? operationIndex;
+        [DataMember(EmitDefaultValue = false)] public RawTypeAdmissionMethodVariant[] compilerVariants;
         [DataMember(IsRequired = true)] public string operationSignature;
         [DataMember(IsRequired = true)] public string providerAssemblyIdentity;
         [DataMember(IsRequired = true)] public string typeName;
@@ -31,6 +40,9 @@ namespace HybridCLR.AssemblyShadow.CodeGen
     {
         public const string ProjectRelativePath = "ProjectSettings/AssemblyShadowRawTypeAdmissions.json";
         public const string Policy = "assembly-shadow-raw-type-admission:1";
+        public const string PolicyV2 = "assembly-shadow-raw-type-admission:2";
+        public const string DevelopmentCompilerMode = "Development";
+        public const string ReleaseCompilerMode = "Release";
         [DataMember(IsRequired = true)] public int schemaVersion = 1;
         [DataMember(IsRequired = true)] public string policy = Policy;
         [DataMember(IsRequired = true)] public RawTypeAdmissionSite[] sites = new RawTypeAdmissionSite[0];
@@ -42,18 +54,41 @@ namespace HybridCLR.AssemblyShadow.CodeGen
 
         public void Validate()
         {
-            BindingChecks.Require(schemaVersion == 1 && policy == Policy && sites != null && sites.Length > 0 && sites.Length <= 4096,
-                "InvalidRawAdmissionConfiguration", "Expected raw admission schema/policy 1 and 1..4096 sites.");
+            bool legacy = schemaVersion == 1 && policy == Policy;
+            bool compilerBound = schemaVersion == 2 && policy == PolicyV2;
+            BindingChecks.Require((legacy || compilerBound) && sites != null && sites.Length > 0 && sites.Length <= 4096,
+                "InvalidRawAdmissionConfiguration", "Expected matching raw admission schema/policy 1 or 2 and 1..4096 sites.");
             var ids = new HashSet<string>(StringComparer.Ordinal);
             var operations = new HashSet<string>(StringComparer.Ordinal);
-            var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
+            var methodProfiles = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var site in sites)
             {
                 BindingChecks.Require(site != null && Match(site.id, @"[A-Za-z0-9_.-]{1,128}") &&
                     Match(site.consumerAssembly, @"[A-Za-z_][A-Za-z0-9_.-]*") && !site.consumerAssembly.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) &&
-                    Text(site.declaringType) && Text(site.methodSignature) && BindingChecks.IsHash(site.methodHash) && site.operationIndex >= 0 &&
+                    Text(site.declaringType) && Text(site.methodSignature) &&
                     Text(site.operationSignature) && Text(site.providerAssemblyIdentity) && site.typeName != null && Text(site.reason),
-                    "InvalidRawAdmissionSite", "All twelve fields and a complete site identity are required.");
+                    "InvalidRawAdmissionSite", "A complete raw admission site identity is required.");
+                RawTypeAdmissionMethodVariant[] variants;
+                if (legacy)
+                {
+                    BindingChecks.Require(BindingChecks.IsHash(site.methodHash) && site.operationIndex.HasValue && site.operationIndex.Value >= 0 &&
+                        (site.compilerVariants == null || site.compilerVariants.Length == 0),
+                        "InvalidRawAdmissionMethodVariants", "Schema 1 requires one legacy method hash/index and no compiler variants: " + site.id);
+                    variants = new[] { new RawTypeAdmissionMethodVariant { compilerMode = "Legacy", methodHash = site.methodHash, operationIndex = site.operationIndex.Value } };
+                }
+                else
+                {
+                    BindingChecks.Require(site.methodHash == null && !site.operationIndex.HasValue && site.compilerVariants != null && site.compilerVariants.Length == 2,
+                        "InvalidRawAdmissionMethodVariants", "Schema 2 requires exactly Development and Release compiler variants: " + site.id);
+                    var modes = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var variant in site.compilerVariants)
+                        BindingChecks.Require(variant != null && (variant.compilerMode == DevelopmentCompilerMode || variant.compilerMode == ReleaseCompilerMode) &&
+                            modes.Add(variant.compilerMode) && BindingChecks.IsHash(variant.methodHash) && variant.operationIndex >= 0,
+                            "InvalidRawAdmissionMethodVariants", "Compiler variants require unique known modes, exact hashes and non-negative indices: " + site.id);
+                    BindingChecks.Require(modes.SetEquals(new[] { DevelopmentCompilerMode, ReleaseCompilerMode }),
+                        "InvalidRawAdmissionMethodVariants", "Both compiler modes are required: " + site.id);
+                    variants = site.compilerVariants;
+                }
                 string provider = ReflectionBindingConfiguration.ProviderOf("Admission.Anchor, " + site.providerAssemblyIdentity);
                 BindingChecks.Require(site.providerAssemblyIdentity.Split(',').Length == 4 &&
                     new AssemblyNameInfo(site.providerAssemblyIdentity).FullName == site.providerAssemblyIdentity,
@@ -68,28 +103,52 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 else BindingChecks.Require(site.typeName == "" && !site.throwOnError && !site.ignoreCase, "InvalidRawAdmissionFlags", site.id);
                 BindingChecks.Require(ids.Add(site.id), "DuplicateRawAdmissionSite", site.id);
                 string method = site.consumerAssembly.ToLowerInvariant() + "\n" + site.declaringType + "\n" + site.methodSignature;
-                BindingChecks.Require(operations.Add(method + "\n" + site.operationIndex), "DuplicateRawAdmissionOperation", site.id);
-                string hash;
-                BindingChecks.Require(!hashes.TryGetValue(method, out hash) || hash == site.methodHash, "InconsistentRawAdmissionMethod", site.id);
-                hashes[method] = site.methodHash;
+                foreach (var variant in variants)
+                    BindingChecks.Require(operations.Add(method + "\n" + variant.compilerMode + "\n" + variant.operationIndex), "DuplicateRawAdmissionOperation", site.id);
+                string profile = string.Join("\n", variants.OrderBy(value => value.compilerMode, StringComparer.Ordinal)
+                    .Select(value => value.compilerMode + ":" + value.methodHash));
+                string prior;
+                BindingChecks.Require(!methodProfiles.TryGetValue(method, out prior) || prior == profile, "InconsistentRawAdmissionMethod", site.id);
+                methodProfiles[method] = profile;
             }
         }
 
         public string ComputeHash()
         {
             Validate();
-            using (var hash = new BindingHash(Policy))
+            using (var hash = new BindingHash(policy))
             {
                 hash.Add(schemaVersion); hash.Add(policy); hash.Add(sites.Length);
                 foreach (var site in sites.OrderBy(value => value.id, StringComparer.Ordinal))
                 {
                     hash.Add(site.id); hash.Add(site.consumerAssembly); hash.Add(site.declaringType); hash.Add(site.methodSignature);
-                    hash.Add(site.methodHash); hash.Add(site.operationIndex); hash.Add(site.operationSignature); hash.Add(site.providerAssemblyIdentity);
+                    if (schemaVersion == 1) { hash.Add(site.methodHash); hash.Add(site.operationIndex.Value); }
+                    else
+                    {
+                        var variants = site.compilerVariants.OrderBy(value => value.compilerMode, StringComparer.Ordinal).ToArray();
+                        hash.Add(variants.Length);
+                        foreach (var variant in variants) { hash.Add(variant.compilerMode); hash.Add(variant.methodHash); hash.Add(variant.operationIndex); }
+                    }
+                    hash.Add(site.operationSignature); hash.Add(site.providerAssemblyIdentity);
                     hash.Add(site.typeName); hash.Add(site.throwOnError); hash.Add(site.ignoreCase); hash.Add(site.reason);
                 }
                 return hash.Finish();
             }
         }
+
+        public RawTypeAdmissionMethodVariant MethodVariant(RawTypeAdmissionSite site, string compilerMode)
+        {
+            Validate();
+            BindingChecks.Require(site != null && sites.Contains(site), "InvalidRawAdmissionSite", "The site must belong to this configuration.");
+            if (schemaVersion == 1)
+                return new RawTypeAdmissionMethodVariant { compilerMode = "Legacy", methodHash = site.methodHash, operationIndex = site.operationIndex.Value };
+            BindingChecks.Require(compilerMode == DevelopmentCompilerMode || compilerMode == ReleaseCompilerMode,
+                "RawAdmissionCompilerModeMissing", "Schema 2 requires an explicit Development or Release compiler mode.");
+            return site.compilerVariants.Single(value => value.compilerMode == compilerMode);
+        }
+
+        public static string CompilerMode(bool developmentBuild)
+        { return developmentBuild ? DevelopmentCompilerMode : ReleaseCompilerMode; }
 
         public static string KindOf(string signature)
         {

@@ -35,7 +35,14 @@ namespace HybridCLR.Editor.AssemblyShadow
             var snapshot = AssemblySnapshot.ReadAndVerify(snapshotRoot, false);
             return Verify(snapshotRoot, snapshot, expectedDevelopmentBuild);
         }
+        internal static ShadowCompilerModeReceipt ReadAndVerify(string snapshotRoot, AssemblySnapshotReceipt snapshot)
+        {
+            var receipt = Read(snapshotRoot);
+            return Verify(snapshotRoot, snapshot, receipt, receipt.developmentBuild);
+        }
         internal static ShadowCompilerModeReceipt Verify(string snapshotRoot, AssemblySnapshotReceipt snapshot, bool expectedDevelopmentBuild)
+        { return Verify(snapshotRoot, snapshot, Read(snapshotRoot), expectedDevelopmentBuild); }
+        private static ShadowCompilerModeReceipt Read(string snapshotRoot)
         {
             string path = Path.Combine(snapshotRoot, ReceiptName); Require(File.Exists(path), "Explicit compiler-mode provenance is missing.");
             byte[] bytes = File.ReadAllBytes(path); Require(bytes.Length > 0 && bytes.Length <= 1024 * 1024, "Compiler-mode receipt size is invalid.");
@@ -43,6 +50,11 @@ namespace HybridCLR.Editor.AssemblyShadow
             try { using (var stream = new MemoryStream(bytes)) receipt = (ShadowCompilerModeReceipt)new DataContractJsonSerializer(typeof(ShadowCompilerModeReceipt)).ReadObject(stream); }
             catch (Exception error) { throw new ShadowBuildException("CompilerModeEvidence", "Malformed compiler-mode receipt: " + error.GetType().Name); }
             Require(receipt != null && Bytes(receipt).SequenceEqual(bytes), "Noncanonical/missing/unknown compiler-mode fields.");
+            return receipt;
+        }
+        private static ShadowCompilerModeReceipt Verify(string snapshotRoot, AssemblySnapshotReceipt snapshot,
+            ShadowCompilerModeReceipt receipt, bool expectedDevelopmentBuild)
+        {
             Require(receipt.schemaVersion == 1 && receipt.kind == "CompilePlayerScriptsMode" && receipt.developmentBuild == expectedDevelopmentBuild &&
                 receipt.compilerOptions == (int)(expectedDevelopmentBuild ? ScriptCompilationOptions.DevelopmentBuild : ScriptCompilationOptions.None), "Compiler mode differs.");
             Require(snapshot != null && snapshot.kind == "CompilePlayerScripts" && receipt.snapshotHash == snapshot.snapshotHash &&

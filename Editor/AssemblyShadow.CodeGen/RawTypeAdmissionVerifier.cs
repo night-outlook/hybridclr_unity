@@ -34,14 +34,14 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         public string CompiledConsumerSha256 { get; private set; }
         public string LinkedConsumerSha256 { get; private set; }
 
-        internal VerifiedRawTypeAdmission(RawTypeAdmissionSite site, MethodDef method, int receiverLoadIndex,
+        internal VerifiedRawTypeAdmission(RawTypeAdmissionSite site, RawTypeAdmissionMethodVariant variant, MethodDef method, int receiverLoadIndex,
             ModuleDefMD provider, string configurationHash, string consumerSha, string providerSha, string inventory,
             VerifiedRawTypeAdmission compiled = null, string linkedProfileHash = null)
         {
             SiteId = site.id; Method = method; ConsumerAssemblyIdentity = method.Module.Assembly.FullName;
             ConsumerSha256 = consumerSha; ProviderAssemblyIdentity = provider.Assembly.FullName; ProviderSha256 = providerSha;
             ProviderInventoryHash = inventory; ConfigurationHash = configurationHash; MethodSignature = method.FullName;
-            MethodHash = ReflectionBindingFingerprint.Compute(method); OperationIndex = site.operationIndex; ReceiverLoadIndex = receiverLoadIndex;
+            MethodHash = ReflectionBindingFingerprint.Compute(method); OperationIndex = variant.operationIndex; ReceiverLoadIndex = receiverLoadIndex;
             ReceiverLiteral = provider.Assembly.Name.String; OperationSignature = site.operationSignature;
             Kind = RawTypeAdmissionConfiguration.KindOf(site.operationSignature); TypeName = site.typeName; ThrowOnError = site.throwOnError; IgnoreCase = site.ignoreCase;
             LinkedProfileHash = linkedProfileHash; CompiledMethodHash = compiled == null ? MethodHash : compiled.MethodHash;
@@ -59,19 +59,28 @@ namespace HybridCLR.AssemblyShadow.CodeGen
     public static class RawTypeAdmissionVerifier
     {
         public static VerifiedRawTypeAdmission[] Verify(IReadOnlyDictionary<string, ModuleDefMD> modules, RawTypeAdmissionConfiguration configuration)
-        { return VerifyCore(modules, configuration, null, null); }
+        { return Verify(modules, configuration, null); }
+
+        public static VerifiedRawTypeAdmission[] Verify(IReadOnlyDictionary<string, ModuleDefMD> modules,
+            RawTypeAdmissionConfiguration configuration, string compilerMode)
+        { return VerifyCore(modules, configuration, null, null, compilerMode); }
 
         public static VerifiedRawTypeAdmission[] VerifyLinked(IReadOnlyDictionary<string, ModuleDefMD> compiledModules,
             IReadOnlyDictionary<string, ModuleDefMD> linkedModules, RawTypeAdmissionConfiguration configuration, CapturedReflectionRetargetingProfile profile)
+        { return VerifyLinked(compiledModules, linkedModules, configuration, profile, null); }
+
+        public static VerifiedRawTypeAdmission[] VerifyLinked(IReadOnlyDictionary<string, ModuleDefMD> compiledModules,
+            IReadOnlyDictionary<string, ModuleDefMD> linkedModules, RawTypeAdmissionConfiguration configuration,
+            CapturedReflectionRetargetingProfile profile, string compilerMode)
         {
-            var compiled = Verify(compiledModules, configuration);
+            var compiled = Verify(compiledModules, configuration, compilerMode);
             BindingChecks.Require(profile != null, "MissingRawAdmissionRetargetingProfile", "Captured per-type linker evidence is required.");
-            var result = VerifyCore(linkedModules, configuration, compiled.ToDictionary(value => value.SiteId, StringComparer.Ordinal), profile);
+            var result = VerifyCore(linkedModules, configuration, compiled.ToDictionary(value => value.SiteId, StringComparer.Ordinal), profile, compilerMode);
             return result;
         }
 
         private static VerifiedRawTypeAdmission[] VerifyCore(IReadOnlyDictionary<string, ModuleDefMD> modules, RawTypeAdmissionConfiguration configuration,
-            IDictionary<string, VerifiedRawTypeAdmission> compiled, CapturedReflectionRetargetingProfile profile)
+            IDictionary<string, VerifiedRawTypeAdmission> compiled, CapturedReflectionRetargetingProfile profile, string compilerMode)
         {
             BindingChecks.Require(configuration != null && modules != null, "MissingRawAdmissionEvidence", "Actual modules and configuration are required.");
             configuration.Validate(); string configurationHash = configuration.ComputeHash();
@@ -105,10 +114,17 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     (method.MethodSig.Params.Count == 0 || method.MethodSig.Params[0].ElementType == ElementType.String),
                     "UnsupportedRawAdmissionHelper", site.id + ": expected a static finite literal helper without EH or generics.");
                 string methodHash = ReflectionBindingFingerprint.Compute(method);
-                if (compiled == null) BindingChecks.Require(methodHash == site.methodHash, "RawAdmissionMethodHashMismatch", site.id);
+                RawTypeAdmissionMethodVariant variant;
+                if (compiled == null)
+                {
+                    variant = configuration.MethodVariant(site, compilerMode);
+                    BindingChecks.Require(methodHash == variant.methodHash, "RawAdmissionMethodHashMismatch",
+                        site.id + ": actual bytes differ from the " + variant.compilerMode + " compiler contract.");
+                }
                 else
                 {
                     var source = compiled[site.id];
+                    variant = new RawTypeAdmissionMethodVariant { compilerMode = compilerMode, methodHash = source.CompiledMethodHash, operationIndex = source.OperationIndex };
                     BindingChecks.Require(source.ConsumerAssemblyIdentity == consumer.Assembly.FullName, "RawAdmissionLinkedIdentityMismatch", site.id);
                     BindingChecks.Require(ReflectionBindingFingerprint.Shape(source.Method, source.Method.DeclaringType.FullName, -1, null, profile.LinkedScope) == methodHash,
                         "RawAdmissionLinkedMethodChanged", site.id);
@@ -122,8 +138,8 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 RequireBytesAgree(provider, null, hashes, inventories, true);
                 HashSet<int> bodyCoverage;
                 if (!covered.TryGetValue(method, out bodyCoverage)) { bodyCoverage = new HashSet<int>(); covered.Add(method, bodyCoverage); }
-                int loadIndex = CheckChain(method, site, provider, catalog, bodyCoverage);
-                results.Add(new VerifiedRawTypeAdmission(site, method, loadIndex, provider, configurationHash, hashes[consumer], hashes[provider], inventories[provider],
+                int loadIndex = CheckChain(method, site, variant.operationIndex, provider, catalog, bodyCoverage);
+                results.Add(new VerifiedRawTypeAdmission(site, variant, method, loadIndex, provider, configurationHash, hashes[consumer], hashes[provider], inventories[provider],
                     compiled == null ? null : compiled[site.id], profile == null ? null : profile.ComputeHash()));
             }
             foreach (var pair in covered) CheckWholeHelper(pair.Key, pair.Value, catalog);
@@ -179,10 +195,10 @@ namespace HybridCLR.AssemblyShadow.CodeGen
             }
         }
 
-        private static int CheckChain(MethodDef method, RawTypeAdmissionSite site, ModuleDefMD provider,
+        private static int CheckChain(MethodDef method, RawTypeAdmissionSite site, int operationIndex, ModuleDefMD provider,
             IDictionary<string, ModuleDefMD> modules, HashSet<int> covered)
         {
-            var il = method.Body.Instructions; int operationIndex = site.operationIndex;
+            var il = method.Body.Instructions;
             BindingChecks.Require(operationIndex < il.Count && il[operationIndex].OpCode.Code == Code.Callvirt, "RawAdmissionOperationMismatch", site.id);
             var operation = il[operationIndex].Operand as IMethod;
             BindingChecks.Require(operation != null && operation.FullName == site.operationSignature && operation.MethodSig != null && operation.MethodSig.HasThis &&

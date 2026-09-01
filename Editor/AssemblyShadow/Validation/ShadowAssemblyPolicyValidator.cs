@@ -87,10 +87,10 @@ namespace HybridCLR.Editor.AssemblyShadow
         public static ShadowPolicyValidationResult ValidateCompiled(CompiledAssemblySet set,
             ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration = null,
             IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null, VerifiedLinkedRuntimeReferences linkedRuntimeReferences = null,
-            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null)
+            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null, string rawTypeAdmissionCompilerMode = null)
         {
             return ValidateCompiledInternal(set, policy, utcNow, acquisitionConfiguration, fixedImageEvidence,
-                linkedRuntimeReferences, rawTypeAdmissionConfiguration, false);
+                linkedRuntimeReferences, rawTypeAdmissionConfiguration, rawTypeAdmissionCompilerMode, false);
         }
 
         /// <summary>
@@ -102,16 +102,16 @@ namespace HybridCLR.Editor.AssemblyShadow
         public static ShadowPolicyValidationResult ValidateCompilerSnapshot(CompiledAssemblySet set,
             ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration = null,
             IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null,
-            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null)
+            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null, string rawTypeAdmissionCompilerMode = null)
         {
             return ValidateCompiledInternal(set, policy, utcNow, acquisitionConfiguration, fixedImageEvidence,
-                null, rawTypeAdmissionConfiguration, true);
+                null, rawTypeAdmissionConfiguration, rawTypeAdmissionCompilerMode, true);
         }
 
         private static ShadowPolicyValidationResult ValidateCompiledInternal(CompiledAssemblySet set,
             ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration,
             IReadOnlyDictionary<string, byte[]> fixedImageEvidence, VerifiedLinkedRuntimeReferences linkedRuntimeReferences,
-            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration, bool compilerSnapshot)
+            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration, string rawTypeAdmissionCompilerMode, bool compilerSnapshot)
         {
             if (set == null)
             {
@@ -121,7 +121,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             }
             var bindingErrors = new ShadowPolicyValidationResult();
             var bindings = VerifyAcquisitions(set, policy, acquisitionConfiguration, fixedImageEvidence, bindingErrors);
-            var rawAdmissions = VerifyRawTypeAdmissions(set, rawTypeAdmissionConfiguration, bindingErrors);
+            var rawAdmissions = VerifyRawTypeAdmissions(set, rawTypeAdmissionConfiguration, rawTypeAdmissionCompilerMode, bindingErrors);
             HashSet<string> reflectionScope = compilerSnapshot ? CompilerReflectionScope(set, policy, bindings, rawAdmissions) : null;
             var definitions = new List<AssemblyPolicyDefinition>();
             foreach (KeyValuePair<string, AssemblyDescriptor> pair in set.Assemblies)
@@ -247,12 +247,12 @@ namespace HybridCLR.Editor.AssemblyShadow
         }
 
         private static VerifiedRawTypeAdmission[] VerifyRawTypeAdmissions(CompiledAssemblySet set,
-            RawTypeAdmissionConfiguration configuration, ShadowPolicyValidationResult errors)
+            RawTypeAdmissionConfiguration configuration, string compilerMode, ShadowPolicyValidationResult errors)
         {
             if (configuration == null) return new VerifiedRawTypeAdmission[0];
             try
             {
-                var proofs = RawTypeAdmissionVerifier.Verify(set.Modules, configuration);
+                var proofs = RawTypeAdmissionVerifier.Verify(set.Modules, configuration, compilerMode);
                 foreach (var proof in proofs)
                 {
                     AssemblyDescriptor consumer, provider;
