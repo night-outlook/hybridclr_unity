@@ -181,9 +181,12 @@ namespace HybridCLR.Editor.AssemblyShadow
             RequirePolicy(policy, root, receipt, requireLinked);
             var configuration = ReadAndVerify(root, receipt, requireLinked);
             var rawConfiguration = ShadowRawTypeAdmissionEvidence.ReadAndVerify(root, receipt, requireLinked);
+            string compilerMode = configuration != null && configuration.schemaVersion >= 4
+                ? ShadowCompilerModeEvidence.CompilerMode(root, receipt)
+                : ShadowRawTypeAdmissionEvidence.CompilerMode(root, receipt, rawConfiguration);
             return ShadowAssemblyPolicyValidator.ValidateCompiled(set, policy, DateTime.UtcNow,
                 configuration, ReadFixedImages(root, configuration), linkedRuntimeReferences, rawConfiguration,
-                ShadowRawTypeAdmissionEvidence.CompilerMode(root, receipt, rawConfiguration));
+                compilerMode);
         }
 
         public static ShadowPolicyValidationResult ValidateCompilerSnapshot(CompiledAssemblySet set, ShadowPolicyConfiguration policy,
@@ -194,9 +197,12 @@ namespace HybridCLR.Editor.AssemblyShadow
             RequirePolicy(policy, root, receipt, false);
             var configuration = ReadAndVerify(root, receipt, false);
             var rawConfiguration = ShadowRawTypeAdmissionEvidence.ReadAndVerify(root, receipt, false);
+            string compilerMode = configuration != null && configuration.schemaVersion >= 4
+                ? ShadowCompilerModeEvidence.CompilerMode(root, receipt)
+                : ShadowRawTypeAdmissionEvidence.CompilerMode(root, receipt, rawConfiguration);
             return ShadowAssemblyPolicyValidator.ValidateCompilerSnapshot(set, policy, DateTime.UtcNow,
                 configuration, ReadFixedImages(root, configuration), rawConfiguration,
-                ShadowRawTypeAdmissionEvidence.CompilerMode(root, receipt, rawConfiguration));
+                compilerMode);
         }
 
         public static void Copy(string source, string destination, AssemblySnapshotReceipt receipt)

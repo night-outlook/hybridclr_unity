@@ -87,10 +87,10 @@ namespace HybridCLR.Editor.AssemblyShadow
         public static ShadowPolicyValidationResult ValidateCompiled(CompiledAssemblySet set,
             ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration = null,
             IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null, VerifiedLinkedRuntimeReferences linkedRuntimeReferences = null,
-            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null, string rawTypeAdmissionCompilerMode = null)
+            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null, string compilerMode = null)
         {
             return ValidateCompiledInternal(set, policy, utcNow, acquisitionConfiguration, fixedImageEvidence,
-                linkedRuntimeReferences, rawTypeAdmissionConfiguration, rawTypeAdmissionCompilerMode, false);
+                linkedRuntimeReferences, rawTypeAdmissionConfiguration, compilerMode, false);
         }
 
         /// <summary>
@@ -102,16 +102,16 @@ namespace HybridCLR.Editor.AssemblyShadow
         public static ShadowPolicyValidationResult ValidateCompilerSnapshot(CompiledAssemblySet set,
             ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration = null,
             IReadOnlyDictionary<string, byte[]> fixedImageEvidence = null,
-            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null, string rawTypeAdmissionCompilerMode = null)
+            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration = null, string compilerMode = null)
         {
             return ValidateCompiledInternal(set, policy, utcNow, acquisitionConfiguration, fixedImageEvidence,
-                null, rawTypeAdmissionConfiguration, rawTypeAdmissionCompilerMode, true);
+                null, rawTypeAdmissionConfiguration, compilerMode, true);
         }
 
         private static ShadowPolicyValidationResult ValidateCompiledInternal(CompiledAssemblySet set,
             ShadowPolicyConfiguration policy, DateTime utcNow, ReflectionBindingConfiguration acquisitionConfiguration,
             IReadOnlyDictionary<string, byte[]> fixedImageEvidence, VerifiedLinkedRuntimeReferences linkedRuntimeReferences,
-            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration, string rawTypeAdmissionCompilerMode, bool compilerSnapshot)
+            RawTypeAdmissionConfiguration rawTypeAdmissionConfiguration, string compilerMode, bool compilerSnapshot)
         {
             if (set == null)
             {
@@ -120,8 +120,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 return missing;
             }
             var bindingErrors = new ShadowPolicyValidationResult();
-            var bindings = VerifyAcquisitions(set, policy, acquisitionConfiguration, fixedImageEvidence, bindingErrors);
-            var rawAdmissions = VerifyRawTypeAdmissions(set, rawTypeAdmissionConfiguration, rawTypeAdmissionCompilerMode, bindingErrors);
+            var bindings = VerifyAcquisitions(set, policy, acquisitionConfiguration, fixedImageEvidence, compilerMode, bindingErrors);
+            var rawAdmissions = VerifyRawTypeAdmissions(set, rawTypeAdmissionConfiguration, compilerMode, bindingErrors);
             HashSet<string> reflectionScope = compilerSnapshot ? CompilerReflectionScope(set, policy, bindings, rawAdmissions) : null;
             var definitions = new List<AssemblyPolicyDefinition>();
             foreach (KeyValuePair<string, AssemblyDescriptor> pair in set.Assemblies)
@@ -275,7 +275,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         }
 
         private static VerifiedReflectionBinding[] VerifyAcquisitions(CompiledAssemblySet set, ShadowPolicyConfiguration policy,
-            ReflectionBindingConfiguration configuration, IReadOnlyDictionary<string, byte[]> images, ShadowPolicyValidationResult result)
+            ReflectionBindingConfiguration configuration, IReadOnlyDictionary<string, byte[]> images, string compilerMode,
+            ShadowPolicyValidationResult result)
         {
             var verified = new List<VerifiedReflectionBinding>();
             if (configuration == null)
@@ -310,8 +311,21 @@ namespace HybridCLR.Editor.AssemblyShadow
                             throw new ReflectionBindingException("InvalidFixedImageProvider", binding.SiteId + ": expected actual ordinary hot-update input " + provider);
                         using (var image = ModuleDefMD.Load(images[binding.ImagePath], new ModuleCreationOptions { TryToLoadPdbFromDisk = false }))
                         {
-                            if (set.GetModule(provider).Assembly.FullName != binding.ProviderAssemblyIdentity ||
-                                AssemblySemanticHasher.Compute(image).semanticHash != AssemblySemanticHasher.Compute(set.GetModule(provider)).semanticHash)
+                            if (set.GetModule(provider).Assembly.FullName != binding.ProviderAssemblyIdentity)
+                                throw new ReflectionBindingException("FixedImageSemanticMismatch", binding.SiteId);
+                            string imageSemanticHash = AssemblySemanticHasher.Compute(image).semanticHash;
+                            string providerSemanticHash = AssemblySemanticHasher.Compute(set.GetModule(provider)).semanticHash;
+                            if (configuration.schemaVersion >= 4)
+                            {
+                                var site = configuration.sites.Single(value => value.id == binding.SiteId);
+                                if (!site.providerSemanticVariants.Any(value => value.semanticHash == imageSemanticHash))
+                                    throw new ReflectionBindingException("FixedImageSemanticVariantMismatch", binding.SiteId);
+                                string expected = configuration.ProviderSemanticHash(site, compilerMode);
+                                if (providerSemanticHash != expected)
+                                    throw new ReflectionBindingException("FixedProviderSemanticMismatch",
+                                        binding.SiteId + ": " + compilerMode + " provider differs from its pinned compiler variant");
+                            }
+                            else if (imageSemanticHash != providerSemanticHash)
                                 throw new ReflectionBindingException("FixedImageSemanticMismatch", binding.SiteId);
                         }
                     }

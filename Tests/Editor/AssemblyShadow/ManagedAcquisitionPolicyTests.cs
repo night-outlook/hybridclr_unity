@@ -69,6 +69,45 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
         }
 
+        [Test] public void FixedImageProviderSemanticsAreBoundToTheCapturedCompilerMode()
+        {
+            using (var fixture = Fixture.Create("Load"))
+            {
+                fixture.Configure("FixedAssemblyBytes");
+                var site = fixture.Configuration.sites[0];
+                fixture.Configuration.schemaVersion = 4; fixture.Configuration.transformerVersion = 4;
+                site.additionalMethodVariants = new[]
+                {
+                    new ReflectionBindingMethodVariant { originalMethodHash = new string('a', 64), operationIndex = 7 },
+                };
+                string developmentHash;
+                string releaseHash;
+                using (var development = ModuleDefMD.Load(fixture.ImageBytes))
+                    developmentHash = AssemblySemanticHasher.Compute(development).semanticHash;
+                using (var releaseModule = ModuleDefMD.Load(fixture.ImageBytes))
+                {
+                    releaseModule.GetTypes().Single(type => type.FullName == "Fixture.Payload").Fields.Add(
+                        new FieldDefUser("ReleaseShape", new FieldSig(releaseModule.CorLibTypes.Int32), dnlib.DotNet.FieldAttributes.Public));
+                    releaseHash = AssemblySemanticHasher.Compute(releaseModule).semanticHash;
+                }
+                site.providerSemanticVariants = new[]
+                {
+                    new ReflectionBindingProviderSemanticVariant { compilerMode = RawTypeAdmissionConfiguration.DevelopmentCompilerMode, semanticHash = developmentHash },
+                    new ReflectionBindingProviderSemanticVariant { compilerMode = RawTypeAdmissionConfiguration.ReleaseCompilerMode, semanticHash = releaseHash },
+                };
+                fixture.Policy.reflectionBindingConfigurationHash = fixture.Configuration.ComputeHash();
+                fixture.Transform();
+                fixture.Set.GetModule("Image").GetTypes().Single(type => type.FullName == "Fixture.Payload").Fields.Add(
+                    new FieldDefUser("ReleaseShape", new FieldSig(fixture.Set.GetModule("Image").CorLibTypes.Int32), dnlib.DotNet.FieldAttributes.Public));
+
+                var releaseResult = fixture.Validate(fixture.Configuration, fixture.Images(), RawTypeAdmissionConfiguration.ReleaseCompilerMode);
+                Assert.IsTrue(releaseResult.IsValid, releaseResult.ToString());
+                StringAssert.Contains("FixedProviderSemanticMismatch", fixture.Validate(fixture.Configuration, fixture.Images(),
+                    RawTypeAdmissionConfiguration.DevelopmentCompilerMode).ToString());
+                StringAssert.Contains("ProviderSemanticCompilerModeMissing", fixture.Validate(fixture.Configuration, fixture.Images()).ToString());
+            }
+        }
+
         [Test] public void FixedImageCannotPromoteShadowOrRuntimeProvidersToOrdinaryHotUpdate()
         {
             using (var fixture = Fixture.Create("Load"))
@@ -247,8 +286,9 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             internal ReflectionBindingConfiguration Configuration;
             private string loaderRoot;
             internal Dictionary<string, byte[]> Images() { return new Dictionary<string, byte[]> { { Configuration.sites[0].imagePath, ImageBytes } }; }
-            internal ShadowPolicyValidationResult Validate(ReflectionBindingConfiguration configuration = null, IReadOnlyDictionary<string, byte[]> images = null)
-            { return ShadowAssemblyPolicyValidator.ValidateCompiled(Set, Policy, DateTime.UtcNow, configuration, images); }
+            internal ShadowPolicyValidationResult Validate(ReflectionBindingConfiguration configuration = null,
+                IReadOnlyDictionary<string, byte[]> images = null, string compilerMode = null)
+            { return ShadowAssemblyPolicyValidator.ValidateCompiled(Set, Policy, DateTime.UtcNow, configuration, images, null, null, compilerMode); }
             internal ShadowPolicyValidationResult ValidateCompilerSnapshot()
             { return ShadowAssemblyPolicyValidator.ValidateCompilerSnapshot(Set, Policy, DateTime.UtcNow); }
             internal void AddEmptyRuntime(string name)

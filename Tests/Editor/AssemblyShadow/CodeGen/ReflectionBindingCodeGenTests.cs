@@ -148,6 +148,39 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             Assert.AreEqual("UnexpectedMethodVariants", Assert.Throws<ReflectionBindingException>(() => fixture.Config.Validate()).Code);
         }
 
+        [Test] public void SchemaFourFixedProviderCompilerVariantsAreCanonicalAndFailClosed()
+        {
+            var fixture = Fixture.Create(); var site = fixture.Config.sites[0];
+            fixture.Config.schemaVersion = 4; fixture.Config.transformerVersion = 4;
+            site.kind = "FixedAssemblyBytes"; site.allowedTypes = new string[0];
+            site.imageSha256 = new string('1', 64); site.imagePath = "Images/Provider.dll.bytes";
+            site.providerAssemblyIdentity = "Provider, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null";
+            site.additionalMethodVariants = new[]
+            {
+                new ReflectionBindingMethodVariant { originalMethodHash = new string('a', 64), operationIndex = 7 },
+            };
+            site.providerSemanticVariants = new[]
+            {
+                new ReflectionBindingProviderSemanticVariant { compilerMode = RawTypeAdmissionConfiguration.DevelopmentCompilerMode, semanticHash = new string('b', 64) },
+                new ReflectionBindingProviderSemanticVariant { compilerMode = RawTypeAdmissionConfiguration.ReleaseCompilerMode, semanticHash = new string('c', 64) },
+            };
+            string original = fixture.Config.ComputeHash();
+            Array.Reverse(site.providerSemanticVariants);
+            Assert.AreEqual(original, fixture.Config.ComputeHash());
+            Assert.AreEqual(new string('b', 64), fixture.Config.ProviderSemanticHash(site, RawTypeAdmissionConfiguration.DevelopmentCompilerMode));
+            site.providerSemanticVariants[0].semanticHash = new string('d', 64);
+            Assert.AreNotEqual(original, fixture.Config.ComputeHash());
+            site.providerSemanticVariants = site.providerSemanticVariants.Take(1).ToArray();
+            Assert.AreEqual("InvalidProviderSemanticVariants", Assert.Throws<ReflectionBindingException>(() => fixture.Config.Validate()).Code);
+
+            fixture = Fixture.Create(); site = fixture.Config.sites[0];
+            site.providerSemanticVariants = new[]
+            {
+                new ReflectionBindingProviderSemanticVariant { compilerMode = RawTypeAdmissionConfiguration.DevelopmentCompilerMode, semanticHash = new string('b', 64) },
+            };
+            Assert.AreEqual("UnexpectedProviderSemanticVariants", Assert.Throws<ReflectionBindingException>(() => fixture.Config.Validate()).Code);
+        }
+
         [Test] public void ExtraLookupFailsEvenWithUpdatedMethodFingerprint()
         {
             var fixture = Fixture.Create();

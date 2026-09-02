@@ -254,12 +254,7 @@ namespace HybridCLR.Editor.AssemblyShadow
         internal static string CompilerMode(string root, AssemblySnapshotReceipt snapshot, RawTypeAdmissionConfiguration configuration)
         {
             if (configuration == null || configuration.schemaVersion == 1) return null;
-            ShadowHash.Require(snapshot != null, "RawTypeAdmissionCompilerModeMissing", "A captured snapshot is required.");
-            if (snapshot.kind == "CompilePlayerScripts")
-                return RawTypeAdmissionConfiguration.CompilerMode(ShadowCompilerModeEvidence.ReadAndVerify(root, snapshot).developmentBuild);
-            ShadowHash.Require(snapshot.kind == "PlayerBuildInputs" && snapshot.playerBuildSucceeded,
-                "RawTypeAdmissionCompilerModeMissing", "Schema 2 requires a completed CompilePlayerScripts or Player snapshot.");
-            return RawTypeAdmissionConfiguration.CompilerMode((snapshot.playerBuildOptions & (int)UnityEditor.BuildOptions.Development) != 0);
+            return ShadowCompilerModeEvidence.CompilerMode(root, snapshot);
         }
 
         private static void RequireAbsent(string root)

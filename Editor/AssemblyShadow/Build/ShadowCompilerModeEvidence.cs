@@ -2,6 +2,8 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.Serialization.Json;
+using HybridCLR.AssemblyShadow.CodeGen;
+using UnityEditor;
 using UnityEditor.Build.Player;
 
 namespace HybridCLR.Editor.AssemblyShadow
@@ -39,6 +41,20 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             var receipt = Read(snapshotRoot);
             return Verify(snapshotRoot, snapshot, receipt, receipt.developmentBuild);
+        }
+        internal static string CompilerMode(string snapshotRoot, AssemblySnapshotReceipt snapshot)
+        {
+            Require(snapshot != null, "A captured snapshot is required.");
+            bool development;
+            if (snapshot.kind == "CompilePlayerScripts")
+                development = ReadAndVerify(snapshotRoot, snapshot).developmentBuild;
+            else
+            {
+                Require(snapshot.kind == "PlayerBuildInputs" && snapshot.playerBuildSucceeded,
+                    "Compiler mode requires a completed CompilePlayerScripts or Player snapshot.");
+                development = (snapshot.playerBuildOptions & (int)BuildOptions.Development) != 0;
+            }
+            return RawTypeAdmissionConfiguration.CompilerMode(development);
         }
         internal static ShadowCompilerModeReceipt Verify(string snapshotRoot, AssemblySnapshotReceipt snapshot, bool expectedDevelopmentBuild)
         { return Verify(snapshotRoot, snapshot, Read(snapshotRoot), expectedDevelopmentBuild); }

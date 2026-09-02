@@ -25,6 +25,13 @@ namespace HybridCLR.AssemblyShadow.CodeGen
     }
 
     [DataContract]
+    public sealed class ReflectionBindingProviderSemanticVariant
+    {
+        [DataMember(IsRequired = true)] public string compilerMode;
+        [DataMember(IsRequired = true)] public string semanticHash;
+    }
+
+    [DataContract]
     public sealed class ReflectionBindingSite
     {
         [DataMember(IsRequired = true)] public string id;
@@ -40,6 +47,7 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         [DataMember(EmitDefaultValue = false)] public string providerAssemblyIdentity;
         [DataMember(EmitDefaultValue = false)] public string imagePath;
         [DataMember(EmitDefaultValue = false)] public ReflectionBindingMethodVariant[] additionalMethodVariants;
+        [DataMember(EmitDefaultValue = false)] public ReflectionBindingProviderSemanticVariant[] providerSemanticVariants;
     }
 
     [DataContract]
@@ -66,8 +74,9 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         public void Validate()
         {
             BindingChecks.Require(((schemaVersion == 1 && transformerVersion == 1) || (schemaVersion == 2 && transformerVersion == 2) ||
-                (schemaVersion == 3 && transformerVersion == 3)) && sites != null && sites.Length > 0 && sites.Length <= 4096,
-                "InvalidConfiguration", "Supported matching schema/transformer versions are 1, 2 and 3, with at least one site.");
+                (schemaVersion == 3 && transformerVersion == 3) || (schemaVersion == 4 && transformerVersion == 4)) &&
+                sites != null && sites.Length > 0 && sites.Length <= 4096,
+                "InvalidConfiguration", "Supported matching schema/transformer versions are 1 through 4, with at least one site.");
             var ids = new HashSet<string>(StringComparer.Ordinal);
             var methods = new HashSet<string>(StringComparer.Ordinal);
             foreach (var site in sites)
@@ -97,8 +106,30 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                 {
                     BindingChecks.Require(site.allowedTypes.Length == 0 && BindingChecks.IsHash(site.imageSha256) && IsSafeImagePath(site.imagePath), "InvalidFixedImage", site.id);
                     RequireFullAssemblyIdentity(site.providerAssemblyIdentity);
+                    if (schemaVersion < 4)
+                        BindingChecks.Require(site.providerSemanticVariants == null || site.providerSemanticVariants.Length == 0,
+                            "UnexpectedProviderSemanticVariants", site.id);
+                    else
+                    {
+                        BindingChecks.Require(site.providerSemanticVariants != null && site.providerSemanticVariants.Length == 2,
+                            "InvalidProviderSemanticVariants", "Schema 4 fixed images require exact Development and Release provider semantic hashes: " + site.id);
+                        var modes = new HashSet<string>(StringComparer.Ordinal);
+                        foreach (var variant in site.providerSemanticVariants)
+                            BindingChecks.Require(variant != null &&
+                                (variant.compilerMode == RawTypeAdmissionConfiguration.DevelopmentCompilerMode ||
+                                 variant.compilerMode == RawTypeAdmissionConfiguration.ReleaseCompilerMode) &&
+                                BindingChecks.IsHash(variant.semanticHash) && modes.Add(variant.compilerMode),
+                                "InvalidProviderSemanticVariants", "Provider semantic variants require unique Development/Release modes and hashes: " + site.id);
+                        BindingChecks.Require(modes.SetEquals(new[] { RawTypeAdmissionConfiguration.DevelopmentCompilerMode,
+                            RawTypeAdmissionConfiguration.ReleaseCompilerMode }), "InvalidProviderSemanticVariants", site.id);
+                    }
                 }
-                else BindingChecks.Require(string.IsNullOrEmpty(site.imageSha256) && string.IsNullOrEmpty(site.imagePath) && string.IsNullOrEmpty(site.providerAssemblyIdentity), "UnexpectedFixedImage", site.id);
+                else
+                {
+                    BindingChecks.Require(string.IsNullOrEmpty(site.imageSha256) && string.IsNullOrEmpty(site.imagePath) && string.IsNullOrEmpty(site.providerAssemblyIdentity), "UnexpectedFixedImage", site.id);
+                    BindingChecks.Require(site.providerSemanticVariants == null || site.providerSemanticVariants.Length == 0,
+                        "UnexpectedProviderSemanticVariants", site.id);
+                }
                 var targets = new HashSet<string>(StringComparer.Ordinal);
                 foreach (string target in site.allowedTypes)
                 {
@@ -122,11 +153,18 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     hash.Add(site.operationIndex); hash.Add(site.reason); hash.Add(site.allowedTypes.Length);
                     foreach (string target in site.allowedTypes.OrderBy(value => value, StringComparer.Ordinal)) hash.Add(target);
                     if (schemaVersion >= 2) { hash.Add(site.kind); hash.Add(site.imageSha256); hash.Add(site.providerAssemblyIdentity); hash.Add(site.imagePath); }
-                    if (schemaVersion == 3)
+                    if (schemaVersion >= 3)
                     {
                         var variants = site.additionalMethodVariants.OrderBy(value => value.originalMethodHash, StringComparer.Ordinal).ToArray();
                         hash.Add(variants.Length);
                         foreach (var variant in variants) { hash.Add(variant.originalMethodHash); hash.Add(variant.operationIndex); }
+                    }
+                    if (schemaVersion >= 4)
+                    {
+                        var variants = (site.providerSemanticVariants ?? new ReflectionBindingProviderSemanticVariant[0])
+                            .OrderBy(value => value.compilerMode, StringComparer.Ordinal).ToArray();
+                        hash.Add(variants.Length);
+                        foreach (var variant in variants) { hash.Add(variant.compilerMode); hash.Add(variant.semanticHash); }
                     }
                 }
                 return hash.Finish();
@@ -140,8 +178,19 @@ namespace HybridCLR.AssemblyShadow.CodeGen
             {
                 new ReflectionBindingMethodVariant { originalMethodHash = site.originalMethodHash, operationIndex = site.operationIndex },
             };
-            if (schemaVersion == 3) result.AddRange(site.additionalMethodVariants);
+            if (schemaVersion >= 3) result.AddRange(site.additionalMethodVariants);
             return result.ToArray();
+        }
+
+        public string ProviderSemanticHash(ReflectionBindingSite site, string compilerMode)
+        {
+            Validate();
+            BindingChecks.Require(schemaVersion >= 4 && site != null && KindOf(site) == "FixedAssemblyBytes",
+                "ProviderSemanticVariantsUnavailable", "Schema 4 fixed-image provider semantics are required.");
+            BindingChecks.Require(compilerMode == RawTypeAdmissionConfiguration.DevelopmentCompilerMode ||
+                compilerMode == RawTypeAdmissionConfiguration.ReleaseCompilerMode,
+                "ProviderSemanticCompilerModeMissing", "Fixed-image provider validation requires an exact Development or Release compiler mode.");
+            return site.providerSemanticVariants.Single(value => value.compilerMode == compilerMode).semanticHash;
         }
 
         public bool Targets(string assemblyName) { Validate(); return sites.Any(site => site.assembly == assemblyName); }
