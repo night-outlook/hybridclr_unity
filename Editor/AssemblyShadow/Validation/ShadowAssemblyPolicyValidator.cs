@@ -319,11 +319,15 @@ namespace HybridCLR.Editor.AssemblyShadow
                             {
                                 var site = configuration.sites.Single(value => value.id == binding.SiteId);
                                 if (!site.providerSemanticVariants.Any(value => value.semanticHash == imageSemanticHash))
-                                    throw new ReflectionBindingException("FixedImageSemanticVariantMismatch", binding.SiteId);
+                                    throw new ReflectionBindingException("FixedImageSemanticVariantMismatch",
+                                        binding.SiteId + ": actual image " + imageSemanticHash + "; declared " +
+                                        string.Join(",", site.providerSemanticVariants.OrderBy(value => value.compilerMode, StringComparer.Ordinal)
+                                            .Select(value => value.compilerMode + "=" + value.semanticHash)));
                                 string expected = configuration.ProviderSemanticHash(site, compilerMode);
                                 if (providerSemanticHash != expected)
                                     throw new ReflectionBindingException("FixedProviderSemanticMismatch",
-                                        binding.SiteId + ": " + compilerMode + " provider differs from its pinned compiler variant");
+                                        binding.SiteId + ": " + compilerMode + " provider actual " + providerSemanticHash +
+                                        "; expected " + expected);
                             }
                             else if (imageSemanticHash != providerSemanticHash)
                                 throw new ReflectionBindingException("FixedImageSemanticMismatch", binding.SiteId);
