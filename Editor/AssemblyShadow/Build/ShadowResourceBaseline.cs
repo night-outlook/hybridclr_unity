@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using dnlib.DotNet;
 using UnityEditor;
+using UnityEditor.Build;
 using UnityEditor.Compilation;
 using UnityEngine;
 
@@ -19,6 +20,12 @@ namespace HybridCLR.Editor.AssemblyShadow
         public ShadowSourcePins sourcePins;
         public ShadowPolicyConfiguration policy;
         public ShadowResourceBuildMap resources;
+        /// <summary>
+        /// Exact user defines for the compiler snapshot which owns these new
+        /// resource bytes. Structural replacement bundles must be built in an
+        /// Editor domain compiled with the same set.
+        /// </summary>
+        public string[] extraScriptingDefines = new string[0];
     }
 
     [Serializable]
@@ -86,6 +93,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         public string compilerSnapshotPath = "CompilerInputs";
         public string compilerSnapshotHash;
         public bool compilerSnapshotIsPlayer;
+        public string[] compilerDefines = new string[0];
+        public string[] editorScriptingDefines = new string[0];
         public string metadataAssemblyDirectory = "ResourceAssemblies";
         public ShadowResourceProofFile[] metadataAssemblies = new ShadowResourceProofFile[0];
         public string resourceAbiPath = "resource-abi.json";
@@ -135,11 +144,17 @@ namespace HybridCLR.Editor.AssemblyShadow
             ShadowHash.Require(EditorUserBuildSettings.activeBuildTarget == request.target, "ResourceTargetMismatch", "Switch the active target before building resources.");
             ShadowHash.Require(request.sourcePins.unityVersion == Application.unityVersion && request.sourcePins.target == request.target.ToString() &&
                 request.sourcePins.architecture == request.architecture, "ResourceTargetMismatch", "Resource source pins must match the current Unity target.");
+            string[] compilerDefines = ShadowHash.Sorted(request.extraScriptingDefines ?? new string[0]);
+            ShadowHash.Require(compilerDefines.All(value => Regex.IsMatch(value ?? "", "^[A-Za-z_][A-Za-z_0-9]*$")),
+                "ResourceCompilerDefines", "Resource compiler defines must be finite user symbols.");
+            string[] editorDefines = CurrentEditorDefines(request.target);
+            ShadowHash.Require(compilerDefines.All(editorDefines.Contains), "ResourceEditorDomainMismatch",
+                "Structural resource compiler defines must also be active in this fresh Editor domain.");
             string temporary = ShadowArtifactWriter.Begin(request.outputDirectory);
             var paths = InputPaths(builds);
             var sources = paths.OrderBy(p => p, StringComparer.Ordinal).Select(p => CaptureSource(p, temporary)).ToArray();
             string compileRoot = Path.GetFullPath("_temp/AssemblyShadow/ResourceCompile-" + Guid.NewGuid().ToString("N"));
-            string compiled = AssemblySnapshot.Compile(compileRoot, request.target, request.architecture, request.sourcePins, request.policy, new string[0]);
+            string compiled = AssemblySnapshot.Compile(compileRoot, request.target, request.architecture, request.sourcePins, request.policy, compilerDefines);
             var input = AssemblySnapshot.ReadAndVerify(compiled, false);
             var framework = TargetFrameworkReferenceVerifier.Verify(compiled, input);
             string candidatesJson = JsonUtility.ToJson(request.policy, true);
@@ -176,7 +191,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             var receipt = new ShadowResourceBaselineReceipt
             {
                 provenance = FreshBuildProvenance, unityVersion = Application.unityVersion, target = request.target.ToString(), architecture = request.architecture,
-                compilerSnapshotHash = input.snapshotHash, candidateAssemblies = candidates, buildMap = PortableMap(request.resources),
+                compilerSnapshotHash = input.snapshotHash, compilerDefines = compilerDefines, editorScriptingDefines = editorDefines,
+                candidateAssemblies = candidates, buildMap = PortableMap(request.resources),
                 bundles = builds.Select(b => new ShadowBundleArtifact { name = b.assetBundleName, assets = ShadowHash.Sorted(b.assetNames),
                     sha256 = ShadowHash.File(Path.Combine(bundlesRoot, b.assetBundleName)) }).OrderBy(b => b.name, StringComparer.Ordinal).ToArray(),
                 sources = sources, sourceSetHash = ComputeSourceSetHash(sources), scripts = scripts, dependencies = request.policy.dependencies,
@@ -230,8 +246,15 @@ namespace HybridCLR.Editor.AssemblyShadow
                 input.architecture == receipt.architecture, "ResourceCompilerMismatch", "Resource compiler receipt identity changed.");
             if (receipt.provenance == FreshBuildProvenance)
             {
-                ShadowHash.Require(!receipt.compilerSnapshotIsPlayer && ShadowReflectionBindingEvidence.UserDefines(input.extraScriptingDefines).Length == 0 && receipt.metadataAssemblyDirectory == "ResourceAssemblies",
-                    "ResourceCompilerMismatch", "New resources require one fresh CompilePlayerScripts snapshot without patch defines.");
+                string[] recordedDefines = ShadowHash.Sorted(receipt.compilerDefines ?? new string[0]);
+                string[] recordedEditorDefines = ShadowHash.Sorted(receipt.editorScriptingDefines ?? new string[0]);
+                ShadowHash.Require(!receipt.compilerSnapshotIsPlayer && recordedDefines.SequenceEqual(receipt.compilerDefines ?? new string[0], StringComparer.Ordinal) &&
+                    recordedEditorDefines.SequenceEqual(receipt.editorScriptingDefines ?? new string[0], StringComparer.Ordinal) &&
+                    recordedDefines.All(recordedEditorDefines.Contains) &&
+                    recordedDefines.All(value => Regex.IsMatch(value ?? "", "^[A-Za-z_][A-Za-z_0-9]*$")) &&
+                    ShadowReflectionBindingEvidence.UserDefines(input.extraScriptingDefines).SequenceEqual(recordedDefines, StringComparer.Ordinal) &&
+                    receipt.metadataAssemblyDirectory == "ResourceAssemblies",
+                    "ResourceCompilerMismatch", "New resources require one fresh CompilePlayerScripts snapshot with the exact recorded user defines.");
                 RequireFreshMetadataInputs(receipt, input);
             }
             else VerifyM01Proof(root, receipt);
@@ -309,6 +332,16 @@ namespace HybridCLR.Editor.AssemblyShadow
                 "ResourceSourceSetMismatch", "Null or duplicate resource source path.");
             return ShadowHash.Text("resource-source-set:1\n" + string.Join("\n", entries.OrderBy(s => s.path, StringComparer.Ordinal).Select(s =>
                 JsonUtility.ToJson(s)).ToArray()));
+        }
+
+        private static string[] CurrentEditorDefines(BuildTarget target)
+        {
+            string serialized = PlayerSettings.GetScriptingDefineSymbols(NamedBuildTarget.FromBuildTargetGroup(BuildPipeline.GetBuildTargetGroup(target))) ?? "";
+            string[] values = serialized.Length == 0 ? new string[0] : serialized.Split(';');
+            ShadowHash.Require(values.All(value => Regex.IsMatch(value, "^[A-Za-z_][A-Za-z_0-9]*$")) &&
+                values.Distinct(StringComparer.Ordinal).Count() == values.Length,
+                "ResourceEditorDomainMismatch", "Current Editor scripting defines are not a canonical finite set.");
+            return ShadowHash.Sorted(values);
         }
 
         public static AssetBundleBuild[] ValidateMap(ShadowResourceBuildMap map)

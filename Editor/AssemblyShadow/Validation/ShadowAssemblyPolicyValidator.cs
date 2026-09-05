@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
@@ -812,20 +813,49 @@ namespace HybridCLR.Editor.AssemblyShadow
         private static void ValidateBootstrapResources(string projectRoot, ShadowPolicyConfiguration policy,
             ShadowPolicyValidationResult result)
         {
+            ValidateBootstrapResources(CollectBootstrapResourcePaths(projectRoot, result), projectRoot, policy, result);
+        }
+
+        private static string[] CollectBootstrapResourcePaths(string projectRoot, ShadowPolicyValidationResult result)
+        {
             var resourcePaths = new HashSet<string>(StringComparer.Ordinal);
             try
             {
                 EditorBuildSettingsScene scene = (EditorBuildSettings.scenes ?? new EditorBuildSettingsScene[0])
                     .FirstOrDefault(item => item != null && item.enabled);
-                var roots = new List<string>();
-                if (scene != null) roots.Add(scene.path);
+                var roots = new HashSet<string>(StringComparer.Ordinal);
+                if (scene != null && !string.IsNullOrWhiteSpace(scene.path)) roots.Add(scene.path);
                 foreach (UnityEngine.Object asset in PlayerSettings.GetPreloadedAssets() ?? new UnityEngine.Object[0])
                 {
-                    if (asset == null) continue;
+                    if (asset == null) { result.Error("BootstrapResourceMissing", "PlayerSettings contains a missing preloaded asset."); continue; }
                     string path = AssetDatabase.GetAssetPath(asset);
                     if (string.IsNullOrWhiteSpace(path)) throw new InvalidOperationException("A preloaded asset has no physical asset path.");
                     roots.Add(path);
                 }
+
+                // Every imported Resources asset can be deserialized before the
+                // application-controlled Commit boundary. This inventory uses
+                // AssetDatabase identity rather than a filename convention.
+                foreach (string path in AssetDatabase.GetAllAssetPaths() ?? new string[0])
+                    if (IsResourcesAssetPath(path)) roots.Add(path);
+
+                // Unity and packages may bootstrap objects through ProjectSettings
+                // GUID references (Graphics/Quality/Player settings among others).
+                // Scan the complete finite settings directory so a new Unity field
+                // cannot silently escape this policy.
+                string settingsRoot = Path.Combine(projectRoot, "ProjectSettings");
+                if (Directory.Exists(settingsRoot))
+                    foreach (string settings in Directory.GetFiles(settingsRoot, "*.asset", SearchOption.TopDirectoryOnly))
+                    {
+                        resourcePaths.Add(Path.GetFullPath(settings));
+                        foreach (Match match in Regex.Matches(File.ReadAllText(settings), @"\bguid:\s*([0-9a-fA-F]{32})\b"))
+                        {
+                            string imported = AssetDatabase.GUIDToAssetPath(match.Groups[1].Value);
+                            if (!string.IsNullOrWhiteSpace(imported)) roots.Add(imported);
+                        }
+                    }
+
+                AddAddressablesInitializationRoot(roots, result);
                 foreach (string root in roots)
                     foreach (string dependency in new[] { root }.Concat(AssetDatabase.GetDependencies(root, true) ?? new string[0]))
                     {
@@ -835,7 +865,33 @@ namespace HybridCLR.Editor.AssemblyShadow
                     }
             }
             catch (Exception exception) { result.Error("BootstrapResourceInventoryFailed", exception.Message); }
-            ValidateBootstrapResources(resourcePaths, projectRoot, policy, result);
+            return resourcePaths.OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        }
+
+        private static bool IsResourcesAssetPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !(path.StartsWith("Assets/", StringComparison.Ordinal) ||
+                path.StartsWith("Packages/", StringComparison.Ordinal)) || AssetDatabase.IsValidFolder(path)) return false;
+            string normalized = "/" + path.Replace('\\', '/').Trim('/') + "/";
+            return normalized.IndexOf("/Resources/", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static void AddAddressablesInitializationRoot(ISet<string> roots, ShadowPolicyValidationResult result)
+        {
+            const string typeName = "UnityEditor.AddressableAssets.Settings.AddressableAssetSettingsDefaultObject, Unity.Addressables.Editor";
+            Type settingsType = Type.GetType(typeName, false);
+            if (settingsType == null) return; // The optional package is not installed.
+            try
+            {
+                PropertyInfo property = settingsType.GetProperty("Settings", BindingFlags.Public | BindingFlags.Static);
+                if (property == null) { result.Error("AddressablesInitializationInventoryFailed", "Addressables Settings property is unavailable."); return; }
+                UnityEngine.Object settings = property.GetValue(null, null) as UnityEngine.Object;
+                if (settings == null) return; // Package installed, project not configured.
+                string path = AssetDatabase.GetAssetPath(settings);
+                if (string.IsNullOrWhiteSpace(path)) result.Error("AddressablesInitializationInventoryFailed", "Addressables settings has no imported asset path.");
+                else roots.Add(path);
+            }
+            catch (Exception exception) { result.Error("AddressablesInitializationInventoryFailed", exception.GetBaseException().Message); }
         }
 
         public static void ValidateBootstrapResources(IEnumerable<string> resourcePaths, string projectRoot,

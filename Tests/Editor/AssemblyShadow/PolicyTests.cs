@@ -7,6 +7,8 @@ using System.Runtime.Serialization;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
 using NUnit.Framework;
+using UnityEditor;
+using UnityEngine;
 
 namespace HybridCLR.Editor.AssemblyShadow.Tests
 {
@@ -857,6 +859,52 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             finally
             {
                 if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
+        [TestCase("Assets/Game/Resources/Unsafe.asset", true)]
+        [TestCase("Packages/com.example/Resources/Sub/Unsafe.prefab", true)]
+        [TestCase("Assets/Game/Resource/NotSpecial.asset", false)]
+        [TestCase("Assets/Game/ResourcesLike/NotSpecial.asset", false)]
+        public void ResourcesPathRecognitionUsesAnExactDirectorySegment(string path, bool expected)
+        {
+            MethodInfo method = typeof(ShadowAssemblyPolicyValidator).GetMethod("IsResourcesAssetPath", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.That(method, Is.Not.Null);
+            Assert.That((bool)method.Invoke(null, new object[] { path }), Is.EqualTo(expected));
+        }
+
+        [Test]
+        [Category("UnityEditorIntegration")]
+        public void ImportedResourcesAssetWithCandidateScriptIsAutomaticallyRejected()
+        {
+            string root = "Assets/AssemblyShadowPolicyM07-" + Guid.NewGuid().ToString("N");
+            string resources = root + "/Resources";
+            string asset = resources + "/Unsafe.asset";
+            try
+            {
+                Assert.That(AssetDatabase.CreateFolder("Assets", Path.GetFileName(root)), Is.Not.Empty);
+                Assert.That(AssetDatabase.CreateFolder(root, "Resources"), Is.Not.Empty);
+                string[] scripts = AssetDatabase.FindAssets("PolicyTests t:MonoScript")
+                    .Select(AssetDatabase.GUIDToAssetPath).Where(path => path.EndsWith("/PolicyTests.cs", StringComparison.Ordinal)).ToArray();
+                Assert.That(scripts, Has.Length.EqualTo(1));
+                string guid = AssetDatabase.AssetPathToGUID(scripts[0]);
+                File.WriteAllText(asset,
+                    "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!114 &11400000\nMonoBehaviour:\n" +
+                    "  m_ObjectHideFlags: 0\n  m_CorrespondingSourceObject: {fileID: 0}\n  m_PrefabInstance: {fileID: 0}\n" +
+                    "  m_PrefabAsset: {fileID: 0}\n  m_GameObject: {fileID: 0}\n  m_Enabled: 1\n  m_EditorHideFlags: 0\n" +
+                    "  m_Script: {fileID: 11500000, guid: " + guid + ", type: 3}\n  m_Name: Unsafe\n  m_EditorClassIdentifier: \n");
+                AssetDatabase.ImportAsset(asset, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                var policy = Policy(typeof(PolicyTests).Assembly.GetName().Name);
+                var result = new ShadowPolicyValidationResult();
+                MethodInfo validate = typeof(ShadowAssemblyPolicyValidator).GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+                    .Single(method => method.Name == "ValidateBootstrapResources" && method.GetParameters().Length == 3);
+                validate.Invoke(null, new object[] { Directory.GetParent(Application.dataPath).FullName, policy, result });
+                Assert.That(result.ToString(), Does.Contain("BootstrapResourceBusinessScript").And.Contain("Unsafe.asset"));
+            }
+            finally
+            {
+                AssetDatabase.DeleteAsset(root);
+                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
             }
         }
 

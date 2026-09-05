@@ -102,7 +102,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         }
 
         [Test]
-        public void PatchDefineCompilationCannotEstablishANewResourceBaseline()
+        public void UnrecordedPatchDefineCompilationCannotEstablishANewResourceBaseline()
         {
             using (var fixture = new ReceiptFixture())
             {
@@ -112,6 +112,41 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 input.snapshotHash = AssemblySnapshot.ComputeHash(input);
                 fixture.Json("CompilerInputs/" + AssemblySnapshot.ReceiptName, input);
                 fixture.Receipt.compilerSnapshotHash = input.snapshotHash; fixture.Seal();
+                fixture.Reject("ResourceCompilerMismatch");
+            }
+        }
+
+        [Test]
+        public void StructuralReplacementResourcesBindTheirExactCompilerDefines()
+        {
+            using (var fixture = new ReceiptFixture())
+            {
+                string snapshotRoot = Path.Combine(fixture.Root, "CompilerInputs");
+                var input = AssemblySnapshot.ReadAndVerify(snapshotRoot, false);
+                input.extraScriptingDefines = new[] { "ASSEMBLY_SHADOW_P05" };
+                input.snapshotHash = AssemblySnapshot.ComputeHash(input);
+                fixture.Json("CompilerInputs/" + AssemblySnapshot.ReceiptName, input);
+                fixture.Receipt.compilerSnapshotHash = input.snapshotHash;
+                fixture.Receipt.compilerDefines = new[] { "ASSEMBLY_SHADOW_P05" };
+                fixture.Receipt.editorScriptingDefines = new[] { "ASSEMBLY_SHADOW_P05" };
+                fixture.Seal();
+                Assert.That(fixture.Read().Receipt.compilerDefines, Is.EqualTo(new[] { "ASSEMBLY_SHADOW_P05" }));
+            }
+        }
+
+        [Test]
+        public void StructuralCompilerDefineWithoutMatchingEditorDomainIsRejected()
+        {
+            using (var fixture = new ReceiptFixture())
+            {
+                string snapshotRoot = Path.Combine(fixture.Root, "CompilerInputs");
+                var input = AssemblySnapshot.ReadAndVerify(snapshotRoot, false);
+                input.extraScriptingDefines = new[] { "ASSEMBLY_SHADOW_P05" };
+                input.snapshotHash = AssemblySnapshot.ComputeHash(input);
+                fixture.Json("CompilerInputs/" + AssemblySnapshot.ReceiptName, input);
+                fixture.Receipt.compilerSnapshotHash = input.snapshotHash;
+                fixture.Receipt.compilerDefines = new[] { "ASSEMBLY_SHADOW_P05" };
+                fixture.Seal();
                 fixture.Reject("ResourceCompilerMismatch");
             }
         }
