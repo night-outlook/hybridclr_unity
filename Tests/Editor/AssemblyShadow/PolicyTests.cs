@@ -864,6 +864,10 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
 
         [TestCase("Assets/Game/Resources/Unsafe.asset", true)]
         [TestCase("Packages/com.example/Resources/Sub/Unsafe.prefab", true)]
+        [TestCase("Assets/Editor/Resources/EditorOnly.asset", false)]
+        [TestCase("Packages/com.example/Editor/Resources/EditorOnly.prefab", false)]
+        [TestCase("Resources/unity_builtin_extra", false)]
+        [TestCase("Library/unity default resources", false)]
         [TestCase("Assets/Game/Resource/NotSpecial.asset", false)]
         [TestCase("Assets/Game/ResourcesLike/NotSpecial.asset", false)]
         public void ResourcesPathRecognitionUsesAnExactDirectorySegment(string path, bool expected)

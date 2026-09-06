@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -847,22 +848,25 @@ namespace HybridCLR.Editor.AssemblyShadow
                 if (Directory.Exists(settingsRoot))
                     foreach (string settings in Directory.GetFiles(settingsRoot, "*.asset", SearchOption.TopDirectoryOnly))
                     {
-                        resourcePaths.Add(Path.GetFullPath(settings));
                         foreach (Match match in Regex.Matches(File.ReadAllText(settings), @"\bguid:\s*([0-9a-fA-F]{32})\b"))
                         {
                             string imported = AssetDatabase.GUIDToAssetPath(match.Groups[1].Value);
-                            if (!string.IsNullOrWhiteSpace(imported)) roots.Add(imported);
+                            if (IsInspectablePlayerAssetPath(imported)) roots.Add(imported);
                         }
                     }
 
                 AddAddressablesInitializationRoot(roots, result);
                 foreach (string root in roots)
+                {
+                    if (!IsInspectablePlayerAssetPath(root)) continue;
                     foreach (string dependency in new[] { root }.Concat(AssetDatabase.GetDependencies(root, true) ?? new string[0]))
                     {
+                        if (!IsInspectablePlayerAssetPath(dependency)) continue;
                         string physical = ResolveAssetPath(projectRoot, dependency);
                         if (File.Exists(physical)) resourcePaths.Add(Path.GetFullPath(physical));
                         else if (dependency == root) result.Error("BootstrapResourceMissing", root);
                     }
+                }
             }
             catch (Exception exception) { result.Error("BootstrapResourceInventoryFailed", exception.Message); }
             return resourcePaths.OrderBy(path => path, StringComparer.Ordinal).ToArray();
@@ -870,10 +874,20 @@ namespace HybridCLR.Editor.AssemblyShadow
 
         private static bool IsResourcesAssetPath(string path)
         {
+            if (!IsInspectablePlayerAssetPath(path)) return false;
+            string normalized = "/" + path.Replace('\\', '/').Trim('/') + "/";
+            return normalized.IndexOf("/Resources/", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsInspectablePlayerAssetPath(string path)
+        {
             if (string.IsNullOrWhiteSpace(path) || !(path.StartsWith("Assets/", StringComparison.Ordinal) ||
                 path.StartsWith("Packages/", StringComparison.Ordinal)) || AssetDatabase.IsValidFolder(path)) return false;
             string normalized = "/" + path.Replace('\\', '/').Trim('/') + "/";
-            return normalized.IndexOf("/Resources/", StringComparison.OrdinalIgnoreCase) >= 0;
+            // Unity excludes exact Editor folders from Player data. In
+            // particular, package Editor/Resources assets must not become
+            // false bootstrap roots merely because the Editor imports them.
+            return normalized.IndexOf("/Editor/", StringComparison.OrdinalIgnoreCase) < 0;
         }
 
         private static void AddAddressablesInitializationRoot(ISet<string> roots, ShadowPolicyValidationResult result)
@@ -901,6 +915,17 @@ namespace HybridCLR.Editor.AssemblyShadow
             var physicalSources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             bool currentProject = IsCurrentProject(projectRoot);
             string[] sourceRoots = currentProject ? new string[0] : SourceRoots(projectRoot).ToArray();
+            var importedScripts = new Dictionary<string, List<MonoScript>>(StringComparer.OrdinalIgnoreCase);
+            if (currentProject)
+                foreach (MonoScript script in MonoImporter.GetAllRuntimeMonoScripts() ?? new MonoScript[0])
+                {
+                    if (script == null || !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(script, out string scriptGuid, out long scriptId) ||
+                        string.IsNullOrWhiteSpace(scriptGuid)) continue;
+                    string key = ScriptIdentityKey(scriptGuid, scriptId);
+                    if (!importedScripts.TryGetValue(key, out List<MonoScript> matches))
+                    { matches = new List<MonoScript>(); importedScripts.Add(key, matches); }
+                    matches.Add(script);
+                }
             foreach (string source in sourceRoots.SelectMany(root => Directory.GetFiles(root, "*.cs", SearchOption.AllDirectories)
                 .Concat(Directory.GetFiles(root, "*.dll", SearchOption.AllDirectories))).Distinct(StringComparer.Ordinal))
             {
@@ -927,43 +952,63 @@ namespace HybridCLR.Editor.AssemblyShadow
                     Match guidMatch = Regex.Match(fields, @"(?:^|,)\s*guid\s*:\s*([0-9a-fA-F]{32})\s*(?:,|$)");
                     if (!guidMatch.Success) { result.Error("BootstrapScriptGuidInvalid", asset); continue; }
                     string guid = guidMatch.Groups[1].Value;
+                    Match fileIdMatch = Regex.Match(fields, @"(?:^|,)\s*fileID\s*:\s*(-?[0-9]+)\s*(?:,|$)");
+                    if (!fileIdMatch.Success || !long.TryParse(fileIdMatch.Groups[1].Value, NumberStyles.Integer,
+                        CultureInfo.InvariantCulture, out long fileId))
+                    { result.Error("BootstrapScriptGuidInvalid", asset + " -> " + guid + " has no valid fileID."); continue; }
+                    string scriptKey = ScriptIdentityKey(guid, fileId);
                     string assembly;
-                    if (!scriptAssemblies.TryGetValue(guid, out assembly))
+                    if (!scriptAssemblies.TryGetValue(scriptKey, out assembly))
                     {
-                        string source;
+                        bool resolvedFromImportedScript = false;
                         if (currentProject)
                         {
-                            // Resolve only the actual startup resource's GUID.
-                            // Package Samples~/source~ copies are not imported
-                            // assets and must never create global false collisions.
-                            string imported = AssetDatabase.GUIDToAssetPath(guid);
-                            string physical = string.IsNullOrEmpty(imported) ? null : ResolveAssetPath(projectRoot, imported);
-                            if (FilterImportedAssetPaths(new[] { imported }, ".cs", ".dll").Length != 1 ||
-                                !string.Equals(AssetDatabase.AssetPathToGUID(imported), guid, StringComparison.OrdinalIgnoreCase) ||
-                                string.IsNullOrEmpty(physical) || !File.Exists(physical) ||
-                                !string.Equals(ReadMetaGuid(physical + ".meta"), guid, StringComparison.OrdinalIgnoreCase))
-                            { result.Error("BootstrapScriptGuidUnresolved", asset + " -> " + guid + " is not a physical imported script or managed DLL."); continue; }
-                            physicalSources[guid] = physical;
+                            if (importedScripts.TryGetValue(scriptKey, out List<MonoScript> matches))
+                            {
+                                Type[] classes = matches.Select(script => script.GetClass()).Where(type => type != null).Distinct().ToArray();
+                                if (matches.Count != 1 || classes.Length != 1)
+                                { result.Error("BootstrapScriptGuidUnresolved", asset + " -> " + guid + ":" + fileId + " is ambiguous or has no runtime type."); continue; }
+                                assembly = classes[0].Assembly.GetName().Name;
+                                resolvedFromImportedScript = true;
+                            }
                         }
-                        if (!physicalSources.TryGetValue(guid, out source) || !File.Exists(source))
-                        { result.Error("BootstrapScriptGuidUnresolved", asset + " -> " + guid); continue; }
-                        try
+                        if (!resolvedFromImportedScript)
                         {
-                            if (source.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                            string source;
+                            if (currentProject)
                             {
-                                using (ModuleDefMD module = ModuleDefMD.Load(File.ReadAllBytes(source)))
-                                    assembly = module.Assembly == null ? null : module.Assembly.Name.String;
+                                // Resolve only the actual startup resource's GUID.
+                                // Package Samples~/source~ copies are not imported
+                                // assets and must never create global false collisions.
+                                string imported = AssetDatabase.GUIDToAssetPath(guid);
+                                string physical = string.IsNullOrEmpty(imported) ? null : ResolveAssetPath(projectRoot, imported);
+                                if (FilterImportedAssetPaths(new[] { imported }, ".cs", ".dll").Length != 1 ||
+                                    !string.Equals(AssetDatabase.AssetPathToGUID(imported), guid, StringComparison.OrdinalIgnoreCase) ||
+                                    string.IsNullOrEmpty(physical) || !File.Exists(physical) ||
+                                    !string.Equals(ReadMetaGuid(physical + ".meta"), guid, StringComparison.OrdinalIgnoreCase))
+                                { result.Error("BootstrapScriptGuidUnresolved", asset + " -> " + guid + ":" + fileId + " is not an imported runtime MonoScript or physical script/DLL."); continue; }
+                                physicalSources[guid] = physical;
                             }
-                            else if (currentProject)
+                            if (!physicalSources.TryGetValue(guid, out source) || !File.Exists(source))
+                            { result.Error("BootstrapScriptGuidUnresolved", asset + " -> " + guid); continue; }
+                            try
                             {
-                                string assetPath = AssetDatabase.GUIDToAssetPath(guid);
-                                assembly = string.IsNullOrEmpty(assetPath) ? null : AssemblyNamePolicy.Canonical(CompilationPipeline.GetAssemblyNameFromScriptPath(assetPath));
+                                if (source.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    using (ModuleDefMD module = ModuleDefMD.Load(File.ReadAllBytes(source)))
+                                        assembly = module.Assembly == null ? null : module.Assembly.Name.String;
+                                }
+                                else if (currentProject)
+                                {
+                                    string assetPath = AssetDatabase.GUIDToAssetPath(guid);
+                                    assembly = string.IsNullOrEmpty(assetPath) ? null : AssemblyNamePolicy.Canonical(CompilationPipeline.GetAssemblyNameFromScriptPath(assetPath));
+                                }
+                                else assembly = FindNearestAssemblyDefinition(Path.GetDirectoryName(source), sourceRoots);
                             }
-                            else assembly = FindNearestAssemblyDefinition(Path.GetDirectoryName(source), sourceRoots);
+                            catch (Exception exception) { result.Error("BootstrapScriptIdentityFailed", source + ": " + exception.Message); continue; }
                         }
-                        catch (Exception exception) { result.Error("BootstrapScriptIdentityFailed", source + ": " + exception.Message); continue; }
-                        if (string.IsNullOrWhiteSpace(assembly)) { result.Error("BootstrapScriptIdentityUnknown", source); continue; }
-                        scriptAssemblies[guid] = assembly;
+                        if (string.IsNullOrWhiteSpace(assembly)) { result.Error("BootstrapScriptIdentityUnknown", guid + ":" + fileId); continue; }
+                        scriptAssemblies[scriptKey] = assembly;
                     }
                     AssemblyCapability capability;
                     if (capabilities.TryGetValue(AssemblyNamePolicy.Canonical(assembly), out capability) &&
@@ -981,6 +1026,11 @@ namespace HybridCLR.Editor.AssemblyShadow
                     else if (capability.isShadowCapable) result.Error("BootstrapResourceBusinessScript", asset + " has a managed reference to " + name + ".");
                 }
             }
+        }
+
+        private static string ScriptIdentityKey(string guid, long fileId)
+        {
+            return guid + ":" + fileId.ToString(CultureInfo.InvariantCulture);
         }
 
         private static string FindNearestAssemblyDefinition(string directory, string[] roots)
