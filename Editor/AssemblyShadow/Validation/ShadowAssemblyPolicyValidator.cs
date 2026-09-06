@@ -915,6 +915,18 @@ namespace HybridCLR.Editor.AssemblyShadow
             var physicalSources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             bool currentProject = IsCurrentProject(projectRoot);
             string[] sourceRoots = currentProject ? new string[0] : SourceRoots(projectRoot).ToArray();
+            string[] serializedAssets = (resourcePaths ?? Enumerable.Empty<string>()).Select(Path.GetFullPath)
+                .Distinct(StringComparer.Ordinal).Where(path => path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase) ||
+                    path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase)).ToArray();
+            var importedAssetPaths = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (currentProject)
+                foreach (string path in AssetDatabase.GetAllAssetPaths() ?? new string[0])
+                {
+                    if (!IsInspectablePlayerAssetPath(path)) continue;
+                    string physical = Path.GetFullPath(ResolveAssetPath(projectRoot, path));
+                    if (!serializedAssets.Contains(physical, StringComparer.Ordinal) || importedAssetPaths.ContainsKey(physical)) continue;
+                    importedAssetPaths.Add(physical, path);
+                }
             var importedScripts = new Dictionary<string, List<MonoScript>>(StringComparer.OrdinalIgnoreCase);
             if (currentProject)
                 foreach (MonoScript script in MonoImporter.GetAllRuntimeMonoScripts() ?? new MonoScript[0])
@@ -937,9 +949,9 @@ namespace HybridCLR.Editor.AssemblyShadow
             var capabilities = (policy.assemblies ?? new AssemblyCapability[0]).Where(item => item != null)
                 .GroupBy(item => AssemblyNamePolicy.Canonical(item.name), StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
-            foreach (string asset in (resourcePaths ?? Enumerable.Empty<string>()).Select(Path.GetFullPath).Distinct(StringComparer.Ordinal)
-                .Where(path => path.EndsWith(".unity", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".asset", StringComparison.OrdinalIgnoreCase)))
+            foreach (string asset in serializedAssets)
             {
+                Dictionary<string, string> assetScriptAssemblies = null;
                 string text;
                 try { text = File.ReadAllText(asset); }
                 catch (Exception exception) { result.Error("BootstrapResourceUnreadable", asset + ": " + exception.Message); continue; }
@@ -970,6 +982,12 @@ namespace HybridCLR.Editor.AssemblyShadow
                                 { result.Error("BootstrapScriptGuidUnresolved", asset + " -> " + guid + ":" + fileId + " is ambiguous or has no runtime type."); continue; }
                                 assembly = classes[0].Assembly.GetName().Name;
                                 resolvedFromImportedScript = true;
+                            }
+                            if (!resolvedFromImportedScript && importedAssetPaths.TryGetValue(asset, out string importedAssetPath))
+                            {
+                                if (assetScriptAssemblies == null)
+                                    assetScriptAssemblies = CollectImportedAssetScriptAssemblies(importedAssetPath, asset, result);
+                                if (assetScriptAssemblies.TryGetValue(scriptKey, out assembly)) resolvedFromImportedScript = true;
                             }
                         }
                         if (!resolvedFromImportedScript)
@@ -1031,6 +1049,43 @@ namespace HybridCLR.Editor.AssemblyShadow
         private static string ScriptIdentityKey(string guid, long fileId)
         {
             return guid + ":" + fileId.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static Dictionary<string, string> CollectImportedAssetScriptAssemblies(string assetPath, string physicalPath,
+            ShadowPolicyValidationResult result)
+        {
+            var assemblies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                UnityEngine.Object[] objects = AssetDatabase.LoadAllAssetsAtPath(assetPath) ?? new UnityEngine.Object[0];
+                foreach (UnityEngine.Object item in objects)
+                {
+                    if (item is GameObject root)
+                        foreach (Component component in root.GetComponentsInChildren<Component>(true))
+                        {
+                            if (component == null)
+                            { result.Error("BootstrapScriptGuidUnresolved", physicalPath + " contains a missing component script."); continue; }
+                            if (component is MonoBehaviour behaviour)
+                                AddImportedScriptAssembly(MonoScript.FromMonoBehaviour(behaviour), component.GetType(), physicalPath, assemblies, result);
+                        }
+                    if (item is ScriptableObject scriptable)
+                        AddImportedScriptAssembly(MonoScript.FromScriptableObject(scriptable), item.GetType(), physicalPath, assemblies, result);
+                }
+            }
+            catch (Exception exception) { result.Error("BootstrapScriptIdentityFailed", physicalPath + ": " + exception.Message); }
+            return assemblies;
+        }
+
+        private static void AddImportedScriptAssembly(MonoScript script, Type type, string physicalPath,
+            IDictionary<string, string> assemblies, ShadowPolicyValidationResult result)
+        {
+            if (script == null || type == null || !AssetDatabase.TryGetGUIDAndLocalFileIdentifier(script, out string guid, out long fileId) ||
+                string.IsNullOrWhiteSpace(guid)) return;
+            string key = ScriptIdentityKey(guid, fileId);
+            string assembly = type.Assembly.GetName().Name;
+            if (assemblies.TryGetValue(key, out string existing) && !string.Equals(existing, assembly, StringComparison.OrdinalIgnoreCase))
+                result.Error("BootstrapScriptGuidUnresolved", physicalPath + " maps " + key + " to both " + existing + " and " + assembly + ".");
+            else assemblies[key] = assembly;
         }
 
         private static string FindNearestAssemblyDefinition(string directory, string[] roots)
