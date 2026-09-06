@@ -26,6 +26,9 @@ namespace HybridCLR.Editor.AssemblyShadow
         /// Editor domain compiled with the same set.
         /// </summary>
         public string[] extraScriptingDefines = new string[0];
+        /// <summary>Capture the exact compiler mode required by schema-2 admission evidence.</summary>
+        public bool captureCompilerMode;
+        public bool developmentBuild = true;
     }
 
     [Serializable]
@@ -154,7 +157,10 @@ namespace HybridCLR.Editor.AssemblyShadow
             var paths = InputPaths(builds);
             var sources = paths.OrderBy(p => p, StringComparer.Ordinal).Select(p => CaptureSource(p, temporary)).ToArray();
             string compileRoot = Path.GetFullPath("_temp/AssemblyShadow/ResourceCompile-" + Guid.NewGuid().ToString("N"));
-            string compiled = AssemblySnapshot.Compile(compileRoot, request.target, request.architecture, request.sourcePins, request.policy, compilerDefines);
+            string compiled = request.captureCompilerMode
+                ? AssemblySnapshot.CompileWithOptions(compileRoot, request.target, request.architecture, request.sourcePins,
+                    request.policy, compilerDefines, request.developmentBuild)
+                : AssemblySnapshot.Compile(compileRoot, request.target, request.architecture, request.sourcePins, request.policy, compilerDefines);
             var input = AssemblySnapshot.ReadAndVerify(compiled, false);
             var framework = TargetFrameworkReferenceVerifier.Verify(compiled, input);
             string candidatesJson = JsonUtility.ToJson(request.policy, true);
