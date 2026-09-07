@@ -50,6 +50,17 @@ namespace HybridCLR.Editor.AssemblyShadow
                 "ReflectionBindingPolicyChanged", "Changing a fixed AOT reflection contract requires a new Player baseline.");
             using (var set = ShadowBaselineManifestBuilder.LoadSnapshot(request.currentCompileSnapshot, policy, receipt))
             {
+                // A structural resource change is already sufficient to reject a
+                // DLL-only request. Report that deployment decision before the
+                // general compiled-policy pass, where a deliberately renamed
+                // serialized type can also invalidate a Bootstrap type literal.
+                // Resource-inclusive requests still receive the complete policy
+                // validation below before any output directory is created.
+                var resourceAbi = UnitySerializedTypeAnalyzer.Analyze(set, baseline.shadowCandidates);
+                var diff = ResourceAbiDiff.Compare(baselineAbi, resourceAbi);
+                string[] affected = BundleImpactAnalyzer.GetAffectedBundles(diff, index);
+                ShadowHash.Require(!request.dllOnly || (!diff.RequiresResourceRebuild && !index.hasUnknown), "ResourceRebuildRequired",
+                    "DLL-only rejected. Affected bundles: " + string.Join(", ", affected) + ". " + string.Join("; ", diff.reasons));
                 ShadowReflectionBindingEvidence.AddCompiledDependencies(policy, set.Assemblies.Values);
                 var linkedReferences = VerifiedLinkedRuntimeReferences.Verify(Path.Combine(baselineRoot, baseline.playerInputSnapshot), frozenReceipt, set, policy);
                 ShadowReflectionBindingEvidence.ValidateCompiled(set, policy, request.currentCompileSnapshot, receipt, false, linkedReferences).ThrowIfInvalid();
@@ -62,14 +73,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 foreach (string assembly in closure)
                     ShadowHash.Require(baseline.shadowCandidates.Any(n => AssemblyIdentityUtil.CanonicalName(n) == AssemblyIdentityUtil.CanonicalName(assembly)), "BaselineCandidateMissing", assembly);
                 var order = graph.LoadOrder(closure);
-                var resourceAbi = UnitySerializedTypeAnalyzer.Analyze(set, baseline.shadowCandidates);
-                var diff = ResourceAbiDiff.Compare(baselineAbi, resourceAbi);
                 if (diff.level == ResourceAbiDiffLevel.None && roots.Length > 0) diff.level = ResourceAbiDiffLevel.CodeOnly;
-                string[] affected = BundleImpactAnalyzer.GetAffectedBundles(diff, index);
-                // A settings toggle must never silently authorize unsafe DLL-only output.
-                // Analysis-only/rebuild manifests may still be produced for review.
-                ShadowHash.Require(!request.dllOnly || (!diff.RequiresResourceRebuild && !index.hasUnknown), "ResourceRebuildRequired",
-                    "DLL-only rejected. Affected bundles: " + string.Join(", ", affected) + ". " + string.Join("; ", diff.reasons));
+                affected = BundleImpactAnalyzer.GetAffectedBundles(diff, index);
                 // Warmup never authorizes a patch. It is checked only after the
                 // complete existing policy/resource proof, before any output.
                 var verifiedWarmup = warmup == null ? null : ShadowWarmupValidator.ValidateAndClone(warmup, set, closure);
