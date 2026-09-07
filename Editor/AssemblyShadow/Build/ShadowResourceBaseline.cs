@@ -635,9 +635,16 @@ namespace HybridCLR.Editor.AssemblyShadow
                 ShadowArtifactWriter.CopyVerified(Path.Combine(source, file.path), destination, file.path, file.sha256);
                 if (!string.IsNullOrEmpty(file.pdbPath)) ShadowArtifactWriter.CopyVerified(Path.Combine(source, file.pdbPath), destination, file.pdbPath, file.pdbSha256);
             }
-            ShadowArtifactWriter.Json(destination, AssemblySnapshot.ReceiptName, receipt);
+            string snapshotReceipt = Path.Combine(source, AssemblySnapshot.ReceiptName);
+            ShadowArtifactWriter.CopyVerified(snapshotReceipt, destination, AssemblySnapshot.ReceiptName, ShadowHash.File(snapshotReceipt));
             if (receipt.linkedPlayerReceipt != null) ShadowLinkedPlayerEvidence.Copy(source, destination, receipt);
             ShadowReflectionBindingEvidence.Copy(source, destination, receipt);
+            string compilerMode = Path.Combine(source, ShadowCompilerModeEvidence.ReceiptName);
+            if (File.Exists(compilerMode))
+            {
+                ShadowCompilerModeEvidence.ReadAndVerify(source, receipt);
+                ShadowArtifactWriter.CopyVerified(compilerMode, destination, ShadowCompilerModeEvidence.ReceiptName, ShadowHash.File(compilerMode));
+            }
         }
 
         private static void VerifyMetadataFiles(string root, ShadowResourceBaselineReceipt receipt)
@@ -679,7 +686,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             ShadowHash.Require(abi != null && abi.schemaVersion == ResourceAbiHasher.SchemaVersion && abi.unknowns != null && abi.unknowns.Length == 0 && abi.types != null &&
                 abi.types.All(t => t != null && !t.hasUnknown && (t.unknownReasons ?? new string[0]).Length == 0 && (t.fields ?? new ResourceAbiFieldDescriptor[0]).All(f => f != null && !f.unknown)),
-                "ResourceAbiUnproven", "Unresolved resource ABI cannot establish a resource baseline.");
+                "ResourceAbiUnproven", abi == null ? "Missing resource ABI." :
+                    "Unresolved resource ABI cannot establish a resource baseline: " + string.Join("; ", abi.unknowns ?? new string[0]));
         }
         private static void RequireProvenIndex(ResourceScriptIndex index)
         { ShadowHash.Require(index != null && index.schemaVersion == 2 && !index.hasUnknown && index.unknowns != null && index.unknowns.Length == 0, "ResourceIndexUnproven", index == null ? "Missing index" : string.Join("; ", index.unknowns ?? new string[0])); }
