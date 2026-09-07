@@ -124,13 +124,20 @@ namespace HybridCLR.Editor.AssemblyShadow
             var bindingErrors = new ShadowPolicyValidationResult();
             var bindings = VerifyAcquisitions(set, policy, acquisitionConfiguration, fixedImageEvidence, compilerMode, bindingErrors);
             var rawAdmissions = VerifyRawTypeAdmissions(set, rawTypeAdmissionConfiguration, compilerMode, bindingErrors);
+            VerifiedSerializeReferenceDependency[] serializeReferenceDependencies;
+            try { serializeReferenceDependencies = SerializeReferenceDependencyVerifier.Verify(set, policy == null ? null : policy.dependencies); }
+            catch (Exception error)
+            {
+                serializeReferenceDependencies = new VerifiedSerializeReferenceDependency[0];
+                bindingErrors.Error("InvalidSerializeReferenceContract", error.Message);
+            }
             HashSet<string> reflectionScope = compilerSnapshot ? CompilerReflectionScope(set, policy, bindings, rawAdmissions) : null;
             var definitions = new List<AssemblyPolicyDefinition>();
             foreach (KeyValuePair<string, AssemblyDescriptor> pair in set.Assemblies)
             {
                 AssemblyPolicyDefinition definition = FromDescriptor(pair.Value);
                 if (IsRuntime(definition) && (reflectionScope == null || reflectionScope.Contains(AssemblyIdentityUtil.CanonicalName(pair.Key))))
-                    ReflectionDependencyScanner.ScanVerified(set.Modules, pair.Key, definition, bindings, rawAdmissions);
+                    ReflectionDependencyScanner.ScanVerified(set.Modules, pair.Key, definition, bindings, rawAdmissions, serializeReferenceDependencies);
                 definitions.Add(definition);
             }
             // Resolver modules are evidence for references, not missing Player
@@ -197,6 +204,14 @@ namespace HybridCLR.Editor.AssemblyShadow
                 {
                     foreach (DeclaredRuntimeDependency edge in policy.dependencies.runtimeDependencies ?? new DeclaredRuntimeDependency[0])
                         if (edge != null) { scope.Add(AssemblyIdentityUtil.CanonicalName(edge.consumer)); scope.Add(AssemblyIdentityUtil.CanonicalName(edge.provider)); }
+                    foreach (DeclaredSerializeReferenceDependency declaration in policy.dependencies.serializeReferenceDependencies ?? new DeclaredSerializeReferenceDependency[0])
+                        if (declaration != null)
+                        {
+                            scope.Add(AssemblyIdentityUtil.CanonicalName(declaration.consumer));
+                            foreach (string concreteType in declaration.concreteTypes ?? new string[0])
+                                try { scope.Add(AssemblyIdentityUtil.CanonicalName(ReflectionBindingConfiguration.ProviderOf(concreteType))); }
+                                catch (Exception) { }
+                        }
                     foreach (BootstrapEntrypointDeclaration edge in policy.dependencies.bootstrapEntrypoints ?? new BootstrapEntrypointDeclaration[0])
                         if (edge != null) { scope.Add(AssemblyIdentityUtil.CanonicalName(edge.consumer)); scope.Add(AssemblyIdentityUtil.CanonicalName(edge.provider)); }
                 }
@@ -505,6 +520,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             var dependencies = policy.dependencies;
             if (dependencies == null) return;
+            if (dependencies.schemaVersion != 1 && dependencies.schemaVersion != 2)
+                result.Error("DependencySchema", "Unsupported explicit dependency schema.");
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (DeclaredRuntimeDependency edge in dependencies.runtimeDependencies ?? new DeclaredRuntimeDependency[0])
             {
@@ -548,6 +565,37 @@ namespace HybridCLR.Editor.AssemblyShadow
             foreach (DeclaredResourceDependency edge in dependencies.resourceDependencies ?? new DeclaredResourceDependency[0])
                 if (edge == null || string.IsNullOrWhiteSpace(edge.bundle) || !byName.ContainsKey(AssemblyNamePolicy.Canonical(edge.assembly)))
                     result.Error("InvalidResourceDependency", "Resource dependency requires a bundle and a known assembly.");
+            var managedReferenceKeys = new HashSet<string>(StringComparer.Ordinal);
+            var managedReferences = dependencies.serializeReferenceDependencies ?? new DeclaredSerializeReferenceDependency[0];
+            if (dependencies.schemaVersion < 2 && managedReferences.Length != 0)
+                result.Error("DependencySchema", "SerializeReference declarations require dependency schema 2.");
+            foreach (DeclaredSerializeReferenceDependency declaration in managedReferences)
+            {
+                if (declaration == null || string.IsNullOrWhiteSpace(declaration.consumer) ||
+                    string.IsNullOrWhiteSpace(declaration.callSite) || declaration.callSite.IndexOf("::", StringComparison.Ordinal) <= 0 ||
+                    string.IsNullOrWhiteSpace(declaration.evidence) || declaration.concreteTypes == null || declaration.concreteTypes.Length == 0)
+                {
+                    result.Error("InvalidSerializeReferenceDependency", "SerializeReference declarations require a consumer, Type::field callsite, concrete types and evidence.");
+                    continue;
+                }
+                string consumer = AssemblyNamePolicy.Canonical(declaration.consumer);
+                if (!managedReferenceKeys.Add(consumer + "\n" + declaration.callSite))
+                    result.Error("DuplicateSerializeReferenceDependency", declaration.consumer + " -> " + declaration.callSite);
+                AssemblyPolicyDefinition consumerDefinition;
+                if (!byName.TryGetValue(consumer, out consumerDefinition) || !IsRuntime(consumerDefinition))
+                    result.Error("InvalidSerializeReferenceDependency", "SerializeReference consumer is not a runtime assembly: " + declaration.consumer);
+                var concreteTypes = new HashSet<string>(StringComparer.Ordinal);
+                foreach (string concreteType in declaration.concreteTypes)
+                {
+                    string provider = string.Empty;
+                    try { provider = AssemblyNamePolicy.Canonical(ReflectionBindingConfiguration.ProviderOf(concreteType)); }
+                    catch (Exception error) { result.Error("InvalidSerializeReferenceDependency", declaration.callSite + ": " + error.Message); }
+                    if (!concreteTypes.Add(concreteType)) result.Error("DuplicateSerializeReferenceType", declaration.callSite + " -> " + concreteType);
+                    AssemblyPolicyDefinition providerDefinition;
+                    if (string.IsNullOrEmpty(provider) || !byName.TryGetValue(provider, out providerDefinition) || !IsRuntime(providerDefinition))
+                        result.Error("InvalidSerializeReferenceDependency", "SerializeReference concrete type provider is not a runtime assembly: " + concreteType);
+                }
+            }
         }
 
         private static void ValidateWhitelist(ShadowPolicyConfiguration policy, ShadowPolicyValidationResult result)
@@ -628,9 +676,22 @@ namespace HybridCLR.Editor.AssemblyShadow
 
         private static bool HasDeclaredDependency(ShadowPolicyConfiguration policy, string consumer, string provider)
         {
-            return policy.dependencies != null && (policy.dependencies.runtimeDependencies ?? new DeclaredRuntimeDependency[0]).Any(edge => edge != null &&
+            if (policy.dependencies == null) return false;
+            if ((policy.dependencies.runtimeDependencies ?? new DeclaredRuntimeDependency[0]).Any(edge => edge != null &&
                 string.Equals(AssemblyNamePolicy.Canonical(edge.consumer), AssemblyNamePolicy.Canonical(consumer), StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(AssemblyNamePolicy.Canonical(edge.provider), AssemblyNamePolicy.Canonical(provider), StringComparison.OrdinalIgnoreCase));
+                string.Equals(AssemblyNamePolicy.Canonical(edge.provider), AssemblyNamePolicy.Canonical(provider), StringComparison.OrdinalIgnoreCase))) return true;
+            foreach (DeclaredSerializeReferenceDependency declaration in policy.dependencies.serializeReferenceDependencies ?? new DeclaredSerializeReferenceDependency[0])
+            {
+                if (declaration == null || !string.Equals(AssemblyNamePolicy.Canonical(declaration.consumer), AssemblyNamePolicy.Canonical(consumer), StringComparison.OrdinalIgnoreCase)) continue;
+                foreach (string concreteType in declaration.concreteTypes ?? new string[0])
+                    try
+                    {
+                        if (string.Equals(AssemblyNamePolicy.Canonical(ReflectionBindingConfiguration.ProviderOf(concreteType)),
+                            AssemblyNamePolicy.Canonical(provider), StringComparison.OrdinalIgnoreCase)) return true;
+                    }
+                    catch (Exception) { }
+            }
+            return false;
         }
 
         private static AssemblyCapability FindCapability(ShadowPolicyConfiguration policy, string provider)

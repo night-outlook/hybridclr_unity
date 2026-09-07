@@ -174,6 +174,14 @@ namespace HybridCLR.Editor.AssemblyShadow
                         new DeclaredRuntimeDependency { consumer = item.consumer, provider = item.provider, kind = item.kind, evidence = item.evidence, callSite = item.callSite }).ToArray(),
                     resourceDependencies = (source.dependencies.resourceDependencies ?? new DeclaredResourceDependency[0]).Select(item => item == null ? null :
                         new DeclaredResourceDependency { bundle = item.bundle, assembly = item.assembly }).ToArray(),
+                    serializeReferenceDependencies = (source.dependencies.serializeReferenceDependencies ?? new DeclaredSerializeReferenceDependency[0])
+                        .Select(item => item == null ? null : new DeclaredSerializeReferenceDependency
+                        {
+                            consumer = item.consumer,
+                            callSite = item.callSite,
+                            concreteTypes = item.concreteTypes == null ? null : item.concreteTypes.ToArray(),
+                            evidence = item.evidence,
+                        }).ToArray(),
                     bootstrapEntrypoints = (source.dependencies.bootstrapEntrypoints ?? new BootstrapEntrypointDeclaration[0]).Select(item => item == null ? null :
                         new BootstrapEntrypointDeclaration { consumer = item.consumer, provider = item.provider, typeName = item.typeName, method = item.method,
                             reason = item.reason, callSite = item.callSite, target = item.target }).ToArray(),

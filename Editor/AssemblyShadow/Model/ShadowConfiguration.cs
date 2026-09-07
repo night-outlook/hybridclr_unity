@@ -28,6 +28,7 @@ namespace HybridCLR.Editor.AssemblyShadow
         public int schemaVersion = 1;
         public DeclaredRuntimeDependency[] runtimeDependencies = new DeclaredRuntimeDependency[0];
         public DeclaredResourceDependency[] resourceDependencies = new DeclaredResourceDependency[0];
+        public DeclaredSerializeReferenceDependency[] serializeReferenceDependencies = new DeclaredSerializeReferenceDependency[0];
         public BootstrapEntrypointDeclaration[] bootstrapEntrypoints = new BootstrapEntrypointDeclaration[0];
     }
 
@@ -46,6 +47,20 @@ namespace HybridCLR.Editor.AssemblyShadow
     {
         public string bundle;
         public string assembly;
+    }
+
+    /// <summary>
+    /// Exact finite concrete-type domain for one Unity SerializeReference field.
+    /// This is separate from runtime dependency edges because a managed-reference
+    /// graph may be wholly contained in one assembly.
+    /// </summary>
+    [Serializable]
+    public sealed class DeclaredSerializeReferenceDependency
+    {
+        public string consumer;
+        public string callSite;
+        public string[] concreteTypes = new string[0];
+        public string evidence;
     }
 
     // An approved bootstrap entry is an opaque, reflection-only boundary, not a

@@ -58,7 +58,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         { ScanVerified(modules, assemblyName, definition, new VerifiedReflectionBinding[0]); }
 
         internal static void ScanVerified(IReadOnlyDictionary<string, ModuleDefMD> modules, string assemblyName, AssemblyPolicyDefinition definition,
-            IEnumerable<VerifiedReflectionBinding> verifiedBindings, IEnumerable<VerifiedRawTypeAdmission> rawTypeAdmissions = null)
+            IEnumerable<VerifiedReflectionBinding> verifiedBindings, IEnumerable<VerifiedRawTypeAdmission> rawTypeAdmissions = null,
+            IEnumerable<VerifiedSerializeReferenceDependency> serializeReferenceDependencies = null)
         {
             ModuleDefMD module;
             if (modules == null || !modules.TryGetValue(assemblyName, out module))
@@ -71,6 +72,8 @@ namespace HybridCLR.Editor.AssemblyShadow
             var assemblyBindings = verifiedBindings.Where(binding => AssemblyIdentityUtil.CanonicalName(binding.Assembly) == canonicalAssembly).ToArray();
             var rawAdmissions = (rawTypeAdmissions ?? new VerifiedRawTypeAdmission[0]).Where(binding =>
                 AssemblyIdentityUtil.CanonicalName(new AssemblyNameInfo(binding.ConsumerAssemblyIdentity).Name.String) == canonicalAssembly).ToArray();
+            var managedReferences = (serializeReferenceDependencies ?? new VerifiedSerializeReferenceDependency[0])
+                .Where(binding => binding.Consumer == canonicalAssembly).ToDictionary(binding => binding.CallSite, StringComparer.Ordinal);
             definition.rawTypeAdmissionDependencies.Clear();
             var guardedSites = assemblyBindings.ToDictionary(binding => binding.OriginalMethod);
             var fixedGuards = assemblyBindings.Where(binding => binding.Kind == "FixedAssemblyBytes")
@@ -92,7 +95,12 @@ namespace HybridCLR.Editor.AssemblyShadow
             {
                 foreach (FieldDef field in type.Fields)
                     if (field.CustomAttributes.Any(attribute => attribute.TypeFullName == "UnityEngine.SerializeReference"))
-                        unknown.Add(type.FullName + "::" + field.Name);
+                    {
+                        string fieldSite = type.FullName + "::" + field.Name;
+                        VerifiedSerializeReferenceDependency managedReference;
+                        if (!managedReferences.TryGetValue(fieldSite, out managedReference)) unknown.Add(fieldSite);
+                        else evidence.AddRange(managedReference.ConcreteTypes);
+                    }
                 foreach (MethodDef method in type.Methods)
                 {
                     if (method.Body == null || method.Body.Instructions.Count == 0) continue;

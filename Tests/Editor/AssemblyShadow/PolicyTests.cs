@@ -9,6 +9,7 @@ using dnlib.DotNet.Emit;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace HybridCLR.Editor.AssemblyShadow.Tests
 {
@@ -521,6 +522,15 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 reason = "legacy", kind = null, imageSha256 = null, providerAssemblyIdentity = null, imagePath = null,
             };
             var policy = FilterSourcePolicy();
+            policy.dependencies.schemaVersion = 2;
+            policy.dependencies.serializeReferenceDependencies = new[]
+            {
+                new DeclaredSerializeReferenceDependency
+                {
+                    consumer = "Business", callSite = "Business.Graph::node",
+                    concreteTypes = new[] { "Business.Node, Business" }, evidence = "original managed reference proof",
+                },
+            };
             policy.reflectionBindings = new[] { populated, schema1 };
             var receipt = FilterReceipt(policy);
 
@@ -552,14 +562,24 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 Assert.That(clone.reflectionBindings[1].imageSha256, Is.Null);
                 Assert.That(clone.reflectionBindings[1].providerAssemblyIdentity, Is.Null);
                 Assert.That(clone.reflectionBindings[1].imagePath, Is.Null);
+                Assert.That(clone.dependencies.schemaVersion, Is.EqualTo(2));
+                Assert.That(clone.dependencies.serializeReferenceDependencies, Is.Not.SameAs(policy.dependencies.serializeReferenceDependencies));
+                Assert.That(clone.dependencies.serializeReferenceDependencies[0], Is.Not.SameAs(policy.dependencies.serializeReferenceDependencies[0]));
+                Assert.That(clone.dependencies.serializeReferenceDependencies[0].concreteTypes,
+                    Is.Not.SameAs(policy.dependencies.serializeReferenceDependencies[0].concreteTypes));
+                CollectionAssert.AreEqual(new[] { "Business.Node, Business" },
+                    clone.dependencies.serializeReferenceDependencies[0].concreteTypes);
             }
 
             derived.reflectionBindings[0].allowedTypes[0] = "changed";
             derived.reflectionBindings[0].providers[0] = "changed";
+            derived.dependencies.serializeReferenceDependencies[0].concreteTypes[0] = "changed";
             Assert.That(populated.allowedTypes[0], Is.EqualTo("Example.Allowed"));
             Assert.That(populated.providers[0], Is.EqualTo("Provider"));
             Assert.That(derivedPatch.reflectionBindings[0].allowedTypes[0], Is.EqualTo("Example.Allowed"));
             Assert.That(derivedPatch.reflectionBindings[0].providers[0], Is.EqualTo("Provider"));
+            Assert.That(policy.dependencies.serializeReferenceDependencies[0].concreteTypes[0], Is.EqualTo("Business.Node, Business"));
+            Assert.That(derivedPatch.dependencies.serializeReferenceDependencies[0].concreteTypes[0], Is.EqualTo("Business.Node, Business"));
         }
 
         [Test]
@@ -884,6 +904,11 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             string root = "Assets/AssemblyShadowPolicyM07-" + Guid.NewGuid().ToString("N");
             string resources = root + "/Resources";
             string asset = resources + "/Unsafe.asset";
+            bool ignoredLogs = LogAssert.ignoreFailingMessages;
+            // This fixture is deliberately an invalid MonoBehaviour YAML object.
+            // Unity 2022 emits import/deserialization errors before our validator
+            // can inspect its preserved script GUID, so scope that expected noise.
+            LogAssert.ignoreFailingMessages = true;
             try
             {
                 Assert.That(AssetDatabase.CreateFolder("Assets", Path.GetFileName(root)), Is.Not.Empty);
@@ -907,8 +932,12 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
             finally
             {
-                AssetDatabase.DeleteAsset(root);
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                try
+                {
+                    AssetDatabase.DeleteAsset(root);
+                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                }
+                finally { LogAssert.ignoreFailingMessages = ignoredLogs; }
             }
         }
 

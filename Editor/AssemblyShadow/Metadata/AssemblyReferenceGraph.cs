@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using HybridCLR.AssemblyShadow.CodeGen;
 
 namespace HybridCLR.Editor.AssemblyShadow
 {
@@ -64,7 +65,7 @@ namespace HybridCLR.Editor.AssemblyShadow
 
         private void MergeDeclarations(ShadowDependencyConfiguration config)
         {
-            ShadowHash.Require(config.schemaVersion == 1, "DependencySchema", "Unsupported explicit dependency schema.");
+            ShadowHash.Require(config.schemaVersion == 1 || config.schemaVersion == 2, "DependencySchema", "Unsupported explicit dependency schema.");
             var declared = new HashSet<string>(StringComparer.Ordinal);
             foreach (var edge in config.runtimeDependencies ?? new DeclaredRuntimeDependency[0])
             {
@@ -84,6 +85,34 @@ namespace HybridCLR.Editor.AssemblyShadow
                 string provider = AssemblyIdentityUtil.CanonicalName(edge.assembly);
                 RequireKnown(provider);
                 ShadowHash.Require(resources.Add(edge.bundle + "\n" + provider), "DuplicateResourceDependency", edge.bundle + " -> " + edge.assembly);
+            }
+            var managedReferences = new HashSet<string>(StringComparer.Ordinal);
+            var serializeReferenceDependencies = config.serializeReferenceDependencies ?? new DeclaredSerializeReferenceDependency[0];
+            ShadowHash.Require(config.schemaVersion >= 2 || serializeReferenceDependencies.Length == 0, "DependencySchema",
+                "SerializeReference declarations require dependency schema 2.");
+            foreach (var declaration in serializeReferenceDependencies)
+            {
+                ShadowHash.Require(declaration != null && !string.IsNullOrWhiteSpace(declaration.consumer) &&
+                    !string.IsNullOrWhiteSpace(declaration.callSite) && declaration.callSite.IndexOf("::", StringComparison.Ordinal) > 0 &&
+                    !string.IsNullOrWhiteSpace(declaration.evidence) && declaration.concreteTypes != null && declaration.concreteTypes.Length > 0,
+                    "InvalidSerializeReferenceDependency", "SerializeReference declarations require a consumer, Type::field callsite, concrete types and evidence.");
+                string consumer = AssemblyIdentityUtil.CanonicalName(declaration.consumer);
+                RequireKnown(consumer);
+                ShadowHash.Require(IsRuntime(assemblies[consumer]), "InvalidSerializeReferenceDependency",
+                    "SerializeReference consumer must be a runtime assembly: " + declaration.consumer);
+                ShadowHash.Require(managedReferences.Add(consumer + "\n" + declaration.callSite), "DuplicateSerializeReferenceDependency",
+                    declaration.consumer + " -> " + declaration.callSite);
+                var declaredTypes = new HashSet<string>(StringComparer.Ordinal);
+                foreach (string concreteType in declaration.concreteTypes)
+                {
+                    ShadowHash.Require(declaredTypes.Add(concreteType), "DuplicateSerializeReferenceType", declaration.callSite + " -> " + concreteType);
+                    string provider = AssemblyIdentityUtil.CanonicalName(ReflectionBindingConfiguration.ProviderOf(concreteType));
+                    RequireKnown(provider);
+                    ShadowHash.Require(IsRuntime(assemblies[provider]), "InvalidSerializeReferenceDependency",
+                        "SerializeReference concrete type must belong to a runtime assembly: " + concreteType);
+                    if (consumer != provider && !forward[consumer].Contains(provider))
+                        AddEdge(consumer, provider, "SerializeReference", declaration.evidence + "; " + declaration.callSite);
+                }
             }
             var entries = new HashSet<string>(StringComparer.Ordinal);
             foreach (var entry in config.bootstrapEntrypoints ?? new BootstrapEntrypointDeclaration[0])
