@@ -1020,7 +1020,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 Match[] scriptMatches = Regex.Matches(text, @"m_Script\s*:\s*\{([^}]*)\}").Cast<Match>()
                     .Where(match => !Regex.IsMatch(match.Groups[1].Value, @"(?:^|,)\s*fileID\s*:\s*0\s*(?:,|$)")).ToArray();
                 ImportedAssetScriptInventory assetInventory = null;
-                if (currentProject && importedAssetPaths.TryGetValue(asset, out string importedAssetPath))
+                if (currentProject && importedAssetPaths.TryGetValue(asset, out string importedAssetPath) &&
+                    SupportsImportedObjectInventory(importedAssetPath))
                 {
                     assetInventory = CollectImportedAssetScriptAssemblies(importedAssetPath, asset, result);
                     foreach (string actualAssembly in assetInventory.Assemblies)
@@ -1138,6 +1139,16 @@ namespace HybridCLR.Editor.AssemblyShadow
             internal readonly HashSet<string> Assemblies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             internal int ScriptObjectCount;
             internal bool Complete = true;
+        }
+
+        private static bool SupportsImportedObjectInventory(string assetPath)
+        {
+            // AssetDatabase.LoadAllAssetsAtPath is not a supported way to read
+            // scene objects and emits "Do not use ReadObjectThreaded on scene
+            // objects" in Unity 2022. Scene MonoScript identities are already
+            // resolved from the complete text serialization above.
+            return !string.IsNullOrWhiteSpace(assetPath) &&
+                !assetPath.EndsWith(".unity", StringComparison.OrdinalIgnoreCase);
         }
 
         private static ImportedAssetScriptInventory CollectImportedAssetScriptAssemblies(string assetPath, string physicalPath,

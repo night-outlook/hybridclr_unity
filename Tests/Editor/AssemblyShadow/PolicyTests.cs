@@ -897,6 +897,18 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             Assert.That((bool)method.Invoke(null, new object[] { path }), Is.EqualTo(expected));
         }
 
+        [TestCase("Assets/Bootstrap.unity", false)]
+        [TestCase("Assets/Bootstrap.UNITY", false)]
+        [TestCase("Assets/Bootstrap.prefab", true)]
+        [TestCase("Assets/Bootstrap.asset", true)]
+        public void ImportedObjectInventoryNeverLoadsSceneObjects(string path, bool expected)
+        {
+            MethodInfo method = typeof(ShadowAssemblyPolicyValidator).GetMethod("SupportsImportedObjectInventory",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.That(method, Is.Not.Null);
+            Assert.That((bool)method.Invoke(null, new object[] { path }), Is.EqualTo(expected));
+        }
+
         [Test]
         [Category("UnityEditorIntegration")]
         public void ImportedResourcesAssetWithCandidateScriptIsAutomaticallyRejected()
