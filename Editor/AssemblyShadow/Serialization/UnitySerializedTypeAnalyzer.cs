@@ -25,7 +25,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 "UnityEngine.Vector2", "UnityEngine.Vector3", "UnityEngine.Vector4", "UnityEngine.Vector2Int", "UnityEngine.Vector3Int",
                 "UnityEngine.Rect", "UnityEngine.RectInt", "UnityEngine.Bounds", "UnityEngine.BoundsInt", "UnityEngine.Quaternion",
                 "UnityEngine.Color", "UnityEngine.Color32", "UnityEngine.Matrix4x4", "UnityEngine.LayerMask",
-                "UnityEngine.AnimationCurve", "UnityEngine.Gradient", "UnityEngine.RectOffset", "UnityEngine.Hash128"
+                "UnityEngine.AnimationCurve", "UnityEngine.Gradient", "UnityEngine.RectOffset", "UnityEngine.Hash128",
+                "UnityEngine.Events.UnityEvent"
             }, StringComparer.Ordinal);
 
             public Analysis(CompiledAssemblySet set)

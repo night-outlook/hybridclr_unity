@@ -41,6 +41,27 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         }
 
         [Test]
+        public void ExactUnityEventLeafIsSupportedButArbitraryEngineClassesRemainRejected()
+        {
+            using (var fixture = new MetadataFixture())
+            {
+                var unityEvent = new TypeDefUser("UnityEngine.Events", "UnityEvent", fixture.Engine.CorLibTypes.Object.TypeDefOrRef);
+                var arbitrary = new TypeDefUser("UnityEngine.Events", "NotAUnityEvent", fixture.Engine.CorLibTypes.Object.TypeDefOrRef);
+                fixture.Engine.Types.Add(unityEvent);
+                fixture.Engine.Types.Add(arbitrary);
+                fixture.Field(fixture.Root, "Persistent", new ClassSig(new TypeRefUser(fixture.Module,
+                    unityEvent.Namespace, unityEvent.Name, fixture.Engine.Assembly.ToAssemblyRef())));
+                fixture.Field(fixture.Root, "Arbitrary", new ClassSig(new TypeRefUser(fixture.Module,
+                    arbitrary.Namespace, arbitrary.Name, fixture.Engine.Assembly.ToAssemblyRef())));
+                ResourceAbiDescriptor descriptor = fixture.Analyze();
+                ResourceAbiTypeDescriptor root = descriptor.types.Single(type => type.type == "Root");
+                Assert.IsFalse(root.fields.Single(field => field.name == "Persistent").unknown);
+                Assert.IsTrue(root.fields.Single(field => field.name == "Arbitrary").unknown);
+                Assert.That(descriptor.unknowns, Has.Some.Contains("NotAUnityEvent"));
+            }
+        }
+
+        [Test]
         public void ListChildAndInheritedDtoAreReachableAndTheirChangesAreDetected()
         {
             using (var fixture = new MetadataFixture())
