@@ -20,6 +20,18 @@ namespace HybridCLR.Editor.Il2CppDef
 
             public List<string> AssemblyShadowStartupCandidates { get; set; } = new List<string>();
 
+            public List<string> AssemblyShadowStartupBootstrapAssemblies { get; set; } = new List<string>();
+
+            public List<string> AssemblyShadowStartupStableAotAssemblies { get; set; } = new List<string>();
+
+            public string AssemblyShadowStartupBootstrapAssembly { get; set; } = "";
+
+            public string AssemblyShadowStartupBootstrapNamespace { get; set; } = "";
+
+            public string AssemblyShadowStartupBootstrapType { get; set; } = "";
+
+            public string AssemblyShadowStartupBootstrapMethod { get; set; } = "";
+
             public string UnityVersionTemplateFile { get; set; }
 
             public string UnityVersionOutputFile { get; set; }
@@ -92,7 +104,8 @@ namespace HybridCLR.Editor.Il2CppDef
 
         private void GeneratePlaceHolderAssemblies()
         {
-            var frr = new FileRegionReplace(File.ReadAllText(_options.AssemblyManifestTemplateFile));
+            string template = File.ReadAllText(_options.AssemblyManifestTemplateFile);
+            var frr = new FileRegionReplace(template);
 
             List<string> lines = new List<string>();
 
@@ -103,6 +116,12 @@ namespace HybridCLR.Editor.Il2CppDef
 
             frr.Replace("PLACE_HOLDER", string.Join("\n", lines));
             frr.Replace("ASSEMBLY_SHADOW_STARTUP_CANDIDATES", BuildStartupCandidateLines(_options.AssemblyShadowStartupCandidates));
+            string startupBootstrapLines = BuildStartupBootstrapLines(_options);
+            bool hasStartupBootstrapRegion = template.IndexOf("//!!!{{ASSEMBLY_SHADOW_STARTUP_BOOTSTRAP", StringComparison.Ordinal) >= 0;
+            if (hasStartupBootstrapRegion)
+                frr.Replace("ASSEMBLY_SHADOW_STARTUP_BOOTSTRAP", startupBootstrapLines);
+            else if (HasStartupBootstrapConfiguration(_options))
+                throw new ShadowBuildException("MissingStartupBootstrapRegion", "AssemblyManifest template does not declare the startup bootstrap region.");
 
             frr.Commit(_options.AssemblyManifestOutputFile);
             Debug.Log($"[HybridCLR.Editor.Il2CppDef.Generator] output:{_options.AssemblyManifestOutputFile}");
@@ -133,6 +152,137 @@ namespace HybridCLR.Editor.Il2CppDef
             if (candidate.IndexOf('\0') >= 0)
                 throw new ShadowBuildException("InvalidStartupCandidate", "Assembly Shadow startup candidate names must not contain a NUL character.");
         }
+
+        private static string BuildStartupBootstrapLines(Options options)
+        {
+            string assembly = options.AssemblyShadowStartupBootstrapAssembly ?? "";
+            string ns = options.AssemblyShadowStartupBootstrapNamespace ?? "";
+            string type = options.AssemblyShadowStartupBootstrapType ?? "";
+            string method = options.AssemblyShadowStartupBootstrapMethod ?? "";
+            bool empty = assembly.Length == 0 && ns.Length == 0 && type.Length == 0 && method.Length == 0;
+            if (!empty)
+            {
+                if (assembly.Length == 0 || type.Length == 0 || method.Length == 0)
+                    throw new ShadowBuildException("InvalidStartupBootstrap", "Startup bootstrap assembly, type, and method must all be configured; namespace may be empty for the global namespace.");
+                ValidateStartupBootstrapAssembly(assembly);
+                ValidateStartupBootstrapNamespace(ns);
+                ValidateStartupBootstrapIdentifier(type, "type");
+                ValidateStartupBootstrapIdentifier(method, "method");
+
+                var candidates = new HashSet<string>(NormalizeAssemblyNames(options.AssemblyShadowStartupCandidates), StringComparer.OrdinalIgnoreCase);
+                var ordinary = new HashSet<string>(NormalizeAssemblyNames(options.HotUpdateAssemblies), StringComparer.OrdinalIgnoreCase);
+                string logicalAssembly = AssemblyNamePolicy.Canonical(assembly);
+                if (candidates.Contains(logicalAssembly) || ordinary.Contains(logicalAssembly))
+                    throw new ShadowBuildException("StartupBootstrapAssemblyRole", "Startup bootstrap assembly must not be a shadow candidate or ordinary hot-update assembly: " + assembly);
+
+                var roots = new HashSet<string>(NormalizeAssemblyNames(options.AssemblyShadowStartupBootstrapAssemblies), StringComparer.OrdinalIgnoreCase);
+                roots.UnionWith(NormalizeAssemblyNames(options.AssemblyShadowStartupStableAotAssemblies));
+                if (!roots.Contains(logicalAssembly) || !HasExactRoot(options, assembly))
+                    throw new ShadowBuildException("StartupBootstrapAssemblyRole", "Startup bootstrap assembly must belong to a declared bootstrap or stable-AOT root: " + assembly);
+            }
+
+            return string.Join("\n", new[]
+            {
+                "\tconst char* g_assemblyShadowStartupBootstrapAssembly = " + ToCppStringLiteral(assembly) + ";",
+                "\tconst char* g_assemblyShadowStartupBootstrapNamespace = " + ToCppStringLiteral(ns) + ";",
+                "\tconst char* g_assemblyShadowStartupBootstrapType = " + ToCppStringLiteral(type) + ";",
+                "\tconst char* g_assemblyShadowStartupBootstrapMethod = " + ToCppStringLiteral(method) + ";",
+            });
+        }
+
+        private static bool HasStartupBootstrapConfiguration(Options options)
+        {
+            return !string.IsNullOrEmpty(options.AssemblyShadowStartupBootstrapAssembly) ||
+                !string.IsNullOrEmpty(options.AssemblyShadowStartupBootstrapNamespace) ||
+                !string.IsNullOrEmpty(options.AssemblyShadowStartupBootstrapType) ||
+                !string.IsNullOrEmpty(options.AssemblyShadowStartupBootstrapMethod);
+        }
+
+        private static IEnumerable<string> NormalizeAssemblyNames(IEnumerable<string> names)
+        {
+            return (names ?? Enumerable.Empty<string>())
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(AssemblyNamePolicy.Canonical);
+        }
+
+        private static bool HasExactRoot(Options options, string assembly)
+        {
+            return (options.AssemblyShadowStartupBootstrapAssemblies ?? Enumerable.Empty<string>())
+                .Concat(options.AssemblyShadowStartupStableAotAssemblies ?? Enumerable.Empty<string>())
+                .Any(root => string.Equals(root, assembly, StringComparison.Ordinal) &&
+                    AssemblyNamePolicy.Canonical(root) == root);
+        }
+
+        private static void ValidateStartupBootstrapAssembly(string value)
+        {
+            ValidateStartupBootstrapText(value, "assembly");
+            if (!IsAssemblyName(value))
+                throw new ShadowBuildException("InvalidStartupBootstrap", "Startup bootstrap assembly contains unsafe characters: " + value);
+        }
+
+        private static void ValidateStartupBootstrapNamespace(string value)
+        {
+            ValidateStartupBootstrapText(value, "namespace");
+            if (value.Length == 0)
+                return;
+            foreach (string segment in value.Split('.'))
+                ValidateStartupBootstrapIdentifier(segment, "namespace");
+        }
+
+        private static void ValidateStartupBootstrapIdentifier(string value, string kind)
+        {
+            ValidateStartupBootstrapText(value, kind);
+            if (value.Length == 0 || !IsIdentifier(value))
+                throw new ShadowBuildException("InvalidStartupBootstrap", "Startup bootstrap " + kind + " contains unsafe characters: " + value);
+        }
+
+        private static void ValidateStartupBootstrapText(string value, string kind)
+        {
+            if (value.Trim() != value)
+                throw new ShadowBuildException("InvalidStartupBootstrap", "Startup bootstrap " + kind + " must not have leading or trailing whitespace.");
+            try
+            {
+                if (new UTF8Encoding(false, true).GetByteCount(value) > 512)
+                    throw new ShadowBuildException("InvalidStartupBootstrap", "Startup bootstrap " + kind + " exceeds the native 512-byte UTF-8 limit.");
+            }
+            catch (EncoderFallbackException exception)
+            {
+                throw new ShadowBuildException("InvalidStartupBootstrap", "Startup bootstrap " + kind + " is not valid UTF-8: " + exception.Message);
+            }
+            foreach (char character in value)
+            {
+                if (char.IsControl(character) || character == '"' || character == '\\')
+                    throw new ShadowBuildException("InvalidStartupBootstrap", "Startup bootstrap " + kind + " contains unsafe characters.");
+            }
+        }
+
+        private static bool IsAssemblyName(string value)
+        {
+            if (value.Length == 0 || !IsNameStart(value[0]))
+                return false;
+            for (int i = 1; i < value.Length; i++)
+            {
+                char character = value[i];
+                if (!(IsNamePart(character) || character == '.' || character == '-'))
+                    return false;
+            }
+            return true;
+        }
+
+        private static bool IsIdentifier(string value)
+        {
+            if (value.Length == 0 || !IsNameStart(value[0]))
+                return false;
+            for (int i = 1; i < value.Length; i++)
+            {
+                if (!IsNamePart(value[i]))
+                    return false;
+            }
+            return true;
+        }
+
+        private static bool IsNameStart(char value) { return char.IsLetter(value) || value == '_'; }
+        private static bool IsNamePart(char value) { return char.IsLetterOrDigit(value) || value == '_'; }
 
         private static string ToCppStringLiteral(string value)
         {

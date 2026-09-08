@@ -49,6 +49,146 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         }
 
         [Test]
+        public void StartupBootstrapDefaultsAreEmpty()
+        {
+            using (var fixture = new Fixture())
+            {
+                string output = fixture.Generate(new string[0], new string[0]);
+                StringAssert.Contains("g_assemblyShadowStartupBootstrapAssembly = \"\";", output);
+                StringAssert.Contains("g_assemblyShadowStartupBootstrapNamespace = \"\";", output);
+                StringAssert.Contains("g_assemblyShadowStartupBootstrapType = \"\";", output);
+                StringAssert.Contains("g_assemblyShadowStartupBootstrapMethod = \"\";", output);
+            }
+        }
+
+        [Test]
+        public void ConfiguredStartupBootstrapValuesAreGeneratedAsCppStrings()
+        {
+            using (var fixture = new Fixture())
+            {
+                string output = fixture.Generate(new string[0], new string[0],
+                    "Bootstrap-Core", "Early.Startup", "EntryPoint_1", "Initialize_2",
+                    new[] { "Bootstrap-Core" }, new string[0]);
+                StringAssert.Contains("g_assemblyShadowStartupBootstrapAssembly = \"Bootstrap-Core\";", output);
+                StringAssert.Contains("g_assemblyShadowStartupBootstrapNamespace = \"Early.Startup\";", output);
+                StringAssert.Contains("g_assemblyShadowStartupBootstrapType = \"EntryPoint_1\";", output);
+                StringAssert.Contains("g_assemblyShadowStartupBootstrapMethod = \"Initialize_2\";", output);
+
+                output = fixture.Generate(new string[0], new string[0],
+                    "Stable.Core", "", "EntryPoint", "Initialize",
+                    new string[0], new[] { "Stable.Core" });
+                StringAssert.Contains("g_assemblyShadowStartupBootstrapAssembly = \"Stable.Core\";", output);
+            }
+        }
+
+        [Test]
+        public void StartupBootstrapAssemblyMustMatchDeclaredPhysicalRootExactly()
+        {
+            using (var fixture = new Fixture())
+            {
+                Assert.Throws<ShadowBuildException>(() => fixture.Generate(new string[0], new string[0],
+                    "Bootstrap.dll", "", "EntryPoint", "Initialize", new[] { "Bootstrap" }, new string[0]));
+                Assert.Throws<ShadowBuildException>(() => fixture.Generate(new string[0], new string[0],
+                    "bootstrap", "", "EntryPoint", "Initialize", new[] { "Bootstrap" }, new string[0]));
+            }
+        }
+
+        [Test]
+        public void StartupBootstrapNamesHonorNativeUtf8ByteLimit()
+        {
+            using (var fixture = new Fixture())
+            {
+                string exact = new string('\u00E9', 256); // 512 UTF-8 bytes.
+                string over = new string('\u00E9', 257); // 514 UTF-8 bytes.
+                Assert.DoesNotThrow(() => fixture.Generate(new string[0], new string[0],
+                    exact, "", "EntryPoint", "Initialize", new[] { exact }, new string[0]));
+                Assert.Throws<ShadowBuildException>(() => fixture.Generate(new string[0], new string[0],
+                    over, "", "EntryPoint", "Initialize", new[] { over }, new string[0]));
+
+                Assert.DoesNotThrow(() => fixture.Generate(new string[0], new string[0],
+                    "Bootstrap", exact, "EntryPoint", "Initialize", new[] { "Bootstrap" }, new string[0]));
+                Assert.Throws<ShadowBuildException>(() => fixture.Generate(new string[0], new string[0],
+                    "Bootstrap", over, "EntryPoint", "Initialize", new[] { "Bootstrap" }, new string[0]));
+
+                Assert.DoesNotThrow(() => fixture.Generate(new string[0], new string[0],
+                    "Bootstrap", "", exact, "Initialize", new[] { "Bootstrap" }, new string[0]));
+                Assert.Throws<ShadowBuildException>(() => fixture.Generate(new string[0], new string[0],
+                    "Bootstrap", "", over, "Initialize", new[] { "Bootstrap" }, new string[0]));
+
+                Assert.DoesNotThrow(() => fixture.Generate(new string[0], new string[0],
+                    "Bootstrap", "", "EntryPoint", exact, new[] { "Bootstrap" }, new string[0]));
+                Assert.Throws<ShadowBuildException>(() => fixture.Generate(new string[0], new string[0],
+                    "Bootstrap", "", "EntryPoint", over, new[] { "Bootstrap" }, new string[0]));
+            }
+        }
+
+        [Test]
+        public void StartupBootstrapPartialConfigurationIsRejected()
+        {
+            using (var fixture = new Fixture())
+            {
+                foreach (var values in new[]
+                {
+                    new[] { "Bootstrap", "", "", "Initialize" },
+                    new[] { "Bootstrap", "", "EntryPoint", "" },
+                    new[] { "", "", "EntryPoint", "Initialize" },
+                })
+                {
+                    Assert.Throws<ShadowBuildException>(() => fixture.Generate(new string[0], new string[0],
+                        values[0], values[1], values[2], values[3], new[] { "Bootstrap" }, new string[0]));
+                }
+            }
+        }
+
+        [Test]
+        public void StartupBootstrapUnsafeValuesAreRejected()
+        {
+            using (var fixture = new Fixture())
+            {
+                foreach (string value in new[] { "Bad\nName", "Bad\\Name", "Bad\"Name", "Bad;Name" })
+                {
+                    Assert.Throws<ShadowBuildException>(() => fixture.Generate(new string[0], new string[0],
+                        value, "Early", "EntryPoint", "Initialize", new[] { value }, new string[0]));
+                }
+            }
+        }
+
+        [Test]
+        public void StartupBootstrapMustUseDeclaredBootstrapOrStableAotRoot()
+        {
+            using (var fixture = new Fixture())
+            {
+                Assert.Throws<ShadowBuildException>(() => fixture.Generate(new string[0], new string[0],
+                    "Runtime", "", "EntryPoint", "Initialize", new[] { "Bootstrap" }, new string[0]));
+            }
+        }
+
+        [Test]
+        public void StartupBootstrapRejectsShadowAndOrdinaryRoles()
+        {
+            using (var fixture = new Fixture())
+            {
+                Assert.Throws<ShadowBuildException>(() => fixture.Generate(new[] { "Ordinary" }, new[] { "Shadow" },
+                    "Shadow", "", "EntryPoint", "Initialize", new[] { "Shadow" }, new string[0]));
+                Assert.Throws<ShadowBuildException>(() => fixture.Generate(new[] { "Ordinary" }, new[] { "Shadow" },
+                    "Ordinary", "", "EntryPoint", "Initialize", new[] { "Ordinary" }, new string[0]));
+            }
+        }
+
+        [Test]
+        public void StartupBootstrapGenerationReplacesStaleValues()
+        {
+            using (var fixture = new Fixture())
+            {
+                fixture.Generate(new string[0], new string[0], "Bootstrap", "Early", "EntryPoint", "Initialize",
+                    new[] { "Bootstrap" }, new string[0]);
+                string output = fixture.Generate(new string[0], new string[0]);
+                StringAssert.DoesNotContain("g_assemblyShadowStartupBootstrapAssembly = \"Bootstrap\";", output);
+                StringAssert.Contains("g_assemblyShadowStartupBootstrapAssembly = \"\";", output);
+            }
+        }
+
+        [Test]
         public void DuplicateStartupCandidatesAreRejectedCaseInsensitively()
         {
             using (var fixture = new Fixture())
@@ -99,15 +239,31 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 File.WriteAllText(_assemblyManifestTemplate,
                     "g_placeHolderAssemblies[] = {\n//!!!{{PLACE_HOLDER\n\n//!!!}}PLACE_HOLDER\nnullptr,\n};\n" +
                     "g_assemblyShadowStartupCandidates[] = {\n//!!!{{ASSEMBLY_SHADOW_STARTUP_CANDIDATES\n\n//!!!}}ASSEMBLY_SHADOW_STARTUP_CANDIDATES\nnullptr,\n};\n");
+                File.AppendAllText(_assemblyManifestTemplate,
+                    "extern const uint32_t g_assemblyShadowStartupBootstrapSchemaVersion = 1;\n" +
+                    "//!!!{{ASSEMBLY_SHADOW_STARTUP_BOOTSTRAP\n\n//!!!}}ASSEMBLY_SHADOW_STARTUP_BOOTSTRAP\n");
             }
 
             public string Generate(IEnumerable<string> ordinary, IEnumerable<string> startup)
+            {
+                return Generate(ordinary, startup, "", "", "", "", null, null);
+            }
+
+            public string Generate(IEnumerable<string> ordinary, IEnumerable<string> startup,
+                string bootstrapAssembly, string bootstrapNamespace, string bootstrapType, string bootstrapMethod,
+                IEnumerable<string> bootstrapAssemblies, IEnumerable<string> stableAotAssemblies)
             {
                 var generator = new Il2CppDefGenerator(new Il2CppDefGenerator.Options
                 {
                     UnityVersion = "2022.3.62f2",
                     HotUpdateAssemblies = new List<string>(ordinary),
                     AssemblyShadowStartupCandidates = new List<string>(startup),
+                    AssemblyShadowStartupBootstrapAssemblies = new List<string>(bootstrapAssemblies ?? new string[0]),
+                    AssemblyShadowStartupStableAotAssemblies = new List<string>(stableAotAssemblies ?? new string[0]),
+                    AssemblyShadowStartupBootstrapAssembly = bootstrapAssembly,
+                    AssemblyShadowStartupBootstrapNamespace = bootstrapNamespace,
+                    AssemblyShadowStartupBootstrapType = bootstrapType,
+                    AssemblyShadowStartupBootstrapMethod = bootstrapMethod,
                     UnityVersionTemplateFile = _unityVersionTemplate,
                     UnityVersionOutputFile = _unityVersionOutput,
                     AssemblyManifestTemplateFile = _assemblyManifestTemplate,

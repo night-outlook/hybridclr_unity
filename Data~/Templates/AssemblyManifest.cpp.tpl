@@ -19,4 +19,9 @@ namespace hybridclr
 		//!!!}}ASSEMBLY_SHADOW_STARTUP_CANDIDATES
 		nullptr,
 	};
+
+	extern const uint32_t g_assemblyShadowStartupBootstrapSchemaVersion = 1;
+	//!!!{{ASSEMBLY_SHADOW_STARTUP_BOOTSTRAP
+
+	//!!!}}ASSEMBLY_SHADOW_STARTUP_BOOTSTRAP
 }

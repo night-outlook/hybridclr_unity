@@ -20,6 +20,14 @@ namespace HybridCLR.Editor.AssemblyShadow
         public AssemblyDefinitionAsset[] bootstrapAssemblyDefinitions = new AssemblyDefinitionAsset[0];
         public string[] bootstrapAssemblyNames = new string[0];
 
+        // Optional native early-start callback. The callback is invoked after
+        // core runtime initialization and before UnityEngine readiness is
+        // promised; an empty tuple preserves the legacy startup path.
+        public string startupBootstrapAssembly = "";
+        public string startupBootstrapNamespace = "";
+        public string startupBootstrapType = "";
+        public string startupBootstrapMethod = "";
+
         public string patchOutputRoot = "HybridCLRData/AssemblyShadow/Patches";
         public string baselineOutputRoot = "HybridCLRData/AssemblyShadow/Baselines";
         public string baselineManifestPath = "";
@@ -94,6 +102,10 @@ namespace HybridCLR.Editor.AssemblyShadow
             shadowAssemblyNames = shadowAssemblyNames ?? new string[0];
             bootstrapAssemblyDefinitions = bootstrapAssemblyDefinitions ?? new AssemblyDefinitionAsset[0];
             bootstrapAssemblyNames = bootstrapAssemblyNames ?? new string[0];
+            startupBootstrapAssembly = startupBootstrapAssembly ?? "";
+            startupBootstrapNamespace = startupBootstrapNamespace ?? "";
+            startupBootstrapType = startupBootstrapType ?? "";
+            startupBootstrapMethod = startupBootstrapMethod ?? "";
             targetReferenceDirectories = targetReferenceDirectories ?? new string[0];
             precompiledAssemblyNames = precompiledAssemblyNames ?? new string[0];
             precompiledAssemblyCapabilities = precompiledAssemblyCapabilities ?? new AssemblyCapability[0];

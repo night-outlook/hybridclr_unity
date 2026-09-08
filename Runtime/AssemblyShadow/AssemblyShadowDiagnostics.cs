@@ -91,12 +91,14 @@ namespace HybridCLR
             if (diagnosticsCode == AssemblyShadowErrorCode.FeatureDisabled)
                 return AssemblyShadowErrorCode.FeatureDisabled;
             if (diagnosticsCode != AssemblyShadowErrorCode.Success ||
-                !AssemblyShadowDiagnostics.TryParse(diagnosticsJson, out AssemblyShadowDiagnostics diagnostics) ||
-                diagnostics.schemaVersion != 1 || !diagnostics.enabled)
+                !AssemblyShadowCapabilityReader.TryRead(diagnosticsJson, out AssemblyShadowCapabilityReader.Snapshot diagnostics) ||
+                !diagnostics.hasSchemaVersion || !diagnostics.hasEnabled || diagnostics.schemaVersion != 1 || !diagnostics.enabled)
                 return AssemblyShadowErrorCode.CapabilityUnavailable;
 
-            int capabilityVersion = recovery ? diagnostics.recoveryCapabilityVersion :
-                diagnostics.metadataBudgetCapabilityVersion;
+            if ((recovery && !diagnostics.hasRecoveryCapabilityVersion) ||
+                (!recovery && !diagnostics.hasMetadataBudgetCapabilityVersion))
+                return AssemblyShadowErrorCode.CapabilityUnavailable;
+            int capabilityVersion = recovery ? diagnostics.recoveryCapabilityVersion : diagnostics.metadataBudgetCapabilityVersion;
             return capabilityVersion == 1 ? AssemblyShadowErrorCode.Success :
                 AssemblyShadowErrorCode.CapabilityUnavailable;
         }
