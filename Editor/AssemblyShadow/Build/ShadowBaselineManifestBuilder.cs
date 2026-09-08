@@ -44,6 +44,16 @@ namespace HybridCLR.Editor.AssemblyShadow
                     var captured = bundles.OrderBy(b => b.name, StringComparer.Ordinal).Select(b => b.name + ":" + string.Join("|", ShadowHash.Sorted(b.assets)));
                     ShadowHash.Require(expected.SequenceEqual(captured), "ResourceBuildMapMismatch", "Current resource map differs from the frozen resource build.");
                 }
+                // Capacity admission is derived from the verified Player snapshot
+                // and the installed native helper. It is completed before the
+                // immutable publication directory is created.
+                var profile = MetadataEncodingProfile.CreateCurrentV1(receipt.sourcePins);
+                var ordinaryInputs = MetadataCapacityPlanner.OrdinaryInputs(request.playerInputSnapshot, receipt);
+                var capacity = MetadataCapacityPlanner.Plan(profile, ordinaryInputs);
+                capacity.ordinaryAssemblyCount = ordinaryInputs.Length;
+                capacity.aotCandidateAssemblyCount = candidates.Length;
+                capacity.runtimeReserveMetadataBudget = true;
+                MetadataCapacityPlanner.RequireFits(capacity);
                 string temporary = ShadowArtifactWriter.Begin(request.outputDirectory);
                 var descriptors = set.Assemblies.Values.OrderBy(a => a.name, StringComparer.Ordinal).Select(a => CloneForManifest(a,
                     "PlayerInputs/" + AssemblySnapshot.AllFiles(receipt).Single(f => AssemblyIdentityUtil.CanonicalName(f.name) == AssemblyIdentityUtil.CanonicalName(a.name)).path)).ToArray();
@@ -58,6 +68,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                     reflectionBindings = policy.reflectionBindings,
                     resourceBuildReceiptHash = ShadowHash.File(Path.Combine(frozenResources.Root, ShadowResourceBaseline.ReceiptName)),
                     playerInputSnapshotHash = receipt.snapshotHash, playerBuildGuid = receipt.buildGuid, nativeLibrarySha256 = receipt.nativeLibrarySha256,
+                    nativeBudgetCapabilityVersion = profile.nativeBudgetCapabilityVersion,
+                    metadataEncodingProfile = profile, metadataCapacityReport = capacity,
                     assemblies = descriptors, dependencyGraph = graph.Edges, deferredFacadeReferences = set.DeferredFacadeReferences.ToArray(), bundles = bundles,
                 };
                 foreach (var descriptor in descriptors) ShadowArtifactWriter.Json(temporary, "assemblies/" + descriptor.name + ".json", descriptor);

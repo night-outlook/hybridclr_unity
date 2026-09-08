@@ -39,6 +39,17 @@ namespace HybridCLR.Editor.AssemblyShadow
             ShadowHash.Require(manifest != null && manifest.schemaVersion == 1 && manifest.semanticHashSchema == 1 &&
                 manifest.closure != null && manifest.loadOrder != null && manifest.closure.Length > 0 && manifest.closure.Length <= 4096 &&
                 manifest.closure.All(entry => entry != null && !string.IsNullOrWhiteSpace(entry.name)), "ManifestSchema", "Malformed base patch proof.");
+            ShadowHash.Require(manifest.nativeBudgetCapabilityVersion == 0 || manifest.nativeBudgetCapabilityVersion == 1,
+                "WarmupManifestSchema", "Unsupported metadata budget capability.");
+            if (manifest.nativeBudgetCapabilityVersion == 1)
+            {
+                ShadowHash.Require(manifest.metadataEncodingProfile != null && manifest.metadataCapacityReport != null &&
+                    manifest.metadataCapacityReport.nativeBudgetCapabilityVersion == 1 && manifest.metadataCapacityReport.profileVersion == 1 &&
+                    manifest.metadataCapacityReport.runtimeReserveMetadataBudget && manifest.metadataCapacityReport.fits &&
+                    manifest.metadataCapacityReport.requiredImages == manifest.closure.Length && manifest.closure.All(entry => entry.dllSize > 0),
+                    "WarmupManifestSchema", "Incomplete R01 metadata reservation contract.");
+                manifest.metadataEncodingProfile.ValidateOrThrow();
+            }
             var names = manifest.closure.Select(entry => entry.name).ToArray();
             ShadowHash.Require(names.Select(AssemblyIdentityUtil.CanonicalName).Distinct(StringComparer.Ordinal).Count() == names.Length &&
                 manifest.loadOrder.Length == names.Length && manifest.loadOrder.Distinct(StringComparer.Ordinal).Count() == names.Length &&
@@ -50,6 +61,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 ShadowHash.Require(entry.name == captured.name && entry.sha256 == captured.sha256 && entry.mvid == captured.mvid &&
                     ShadowHash.File(ShadowHash.SafeChild(root, entry.dll)) == captured.sha256,
                     "WarmupClosureBytes", "Patch DLL differs from verified compiler bytes: " + entry.name);
+                ShadowHash.Require(entry.dllSize == 0 || entry.dllSize == (ulong)new FileInfo(ShadowHash.SafeChild(root, entry.dll)).Length,
+                    "WarmupClosureBytes", "Patch DLL size differs from verified compiler bytes: " + entry.name);
                 ShadowHash.Require(string.IsNullOrEmpty(entry.pdb) == string.IsNullOrEmpty(entry.pdbSha256), "WarmupClosureBytes", "Incomplete PDB binding.");
                 if (!string.IsNullOrEmpty(entry.pdb))
                     ShadowHash.Require(ShadowHash.File(ShadowHash.SafeChild(root, entry.pdb)) == entry.pdbSha256, "WarmupClosureBytes", "Patch PDB changed.");

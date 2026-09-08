@@ -25,7 +25,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         public void ContractEnumsAndAbiAreStable()
         {
             Assert.That(Enum.GetValues(typeof(AssemblyShadowErrorCode)).Cast<AssemblyShadowErrorCode>().Select(value => (int)value).ToArray(),
-                Is.EqualTo(Enumerable.Range(0, 22).ToArray()));
+                Is.EqualTo(Enumerable.Range(0, 25).ToArray()));
             Assert.That((int)AssemblyShadowErrorCode.BaselineMethodExecution, Is.EqualTo(21));
             Assert.That((int)AssemblyShadowState.Disabled, Is.EqualTo(0));
             Assert.That((int)AssemblyShadowState.FailedAfterCommit, Is.EqualTo(9));
@@ -76,6 +76,8 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         {
             string json = @"{
                 ""schemaVersion"":1,""enabled"":true,""runtimeAbiVersion"":1,""state"":""Staged"",""stateCode"":3,""lastError"":0,
+                ""metadataBudgetCapabilityVersion"":1,""recoveryCapabilityVersion"":1,
+                ""startupCandidateSchemaVersion"":1,""startupCandidateNames"":[""A""],""startupObservationMode"":""ConfigureOnly"",
                 ""detail"":""diagnostic-detail"",""baselineBuildId"":""b"",""patchId"":""p"",""generation"":2,""expected"":1,""staged"":1,
                 ""retainedBytes"":8,""enumerationGeneration"":3,""classEnumerationGeneration"":3,
                 ""closureLoadOrder"":[""A""],""stableAotNames"":[""mscorlib""],""commitOrder"":[],

@@ -31,12 +31,13 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         };
 
         [Test]
-        public void PublicApiAddsExactlyOneOperationAndOneStableCode()
+        public void PublicApiPreservesM06AndExplicitR01Additions()
         {
             CollectionAssert.AreEquivalent(new[] {
                 "ConfigureCandidates", "BeginTransaction", "StageAssembly", "ValidateTransaction",
                 "CommitTransaction", "AbortTransaction", "GetState", "GetAssemblyExecutionMode",
-                "GetDiagnosticsJson", "GetTypeResolutionInfo", "GetExecutionDiagnosticsJson"
+                "GetDiagnosticsJson", "GetTypeResolutionInfo", "GetExecutionDiagnosticsJson",
+                "GetMetadataCapacityJson", "ReserveMetadataBudget", "GetRecoveryInfoJson"
             }, typeof(AssemblyShadowRuntime).GetMethods(BindingFlags.Public | BindingFlags.Static).Select(m => m.Name).ToArray());
             var method = typeof(AssemblyShadowRuntime).GetMethod("GetExecutionDiagnosticsJson");
             Assert.That(method.ReturnType, Is.EqualTo(typeof(AssemblyShadowErrorCode)));

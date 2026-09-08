@@ -25,5 +25,8 @@ namespace HybridCLR
         ModuleInitializerFailed = 19,
         InternalError = 20,
         BaselineMethodExecution = 21,
+        CapabilityUnavailable = 22,
+        MetadataCapacityExceeded = 23,
+        MetadataBudgetMismatch = 24,
     }
 }

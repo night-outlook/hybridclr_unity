@@ -36,6 +36,16 @@ namespace HybridCLR.Editor.AssemblyShadow
             if (type == typeof(string)) { Check(value == null || value is string, "Expected string."); return value; }
             if (type == typeof(int) || type == typeof(bool))
             { Check(value != null && value.GetType() == type, "Wrong primitive JSON type."); return value; }
+            if (type == typeof(uint) || type == typeof(ulong))
+            {
+                Check(value is ulong || (value is int && (int)value >= 0), "Expected unsigned integer.");
+                ulong number = value is ulong ? (ulong)value : (ulong)(int)value;
+                if (type == typeof(ulong)) return number;
+                Check(number <= uint.MaxValue, "UInt32 JSON integer overflow.");
+                return (uint)number;
+            }
+            if (value == null && (type == typeof(MetadataEncodingProfile) || type == typeof(MetadataCapacityReport)))
+                return null; // Absent R01 capability on a legacy schema-2 patch.
             if (type.IsArray)
             {
                 var values = value as List<object>; Check(values != null && type.GetArrayRank() == 1, "Expected explicit array.");
@@ -46,10 +56,26 @@ namespace HybridCLR.Editor.AssemblyShadow
             var fields = type.GetFields(BindingFlags.Public | BindingFlags.Instance);
             var members = value as Dictionary<string, object>;
             Check(type.IsSerializable && type.Namespace == typeof(ShadowWarmupPlan).Namespace && members != null &&
-                members.Count == fields.Length && fields.All(field => members.ContainsKey(field.Name)), "Missing/unknown DTO field or null object.");
+                members.Keys.All(name => fields.Any(field => field.Name == name)) &&
+                fields.All(field => members.ContainsKey(field.Name) || IsLegacyExtension(type, field.Name)),
+                "Missing/unknown DTO field or null object.");
+            if (type == typeof(ShadowPatchManifest))
+            {
+                string[] extension = { "nativeBudgetCapabilityVersion", "metadataEncodingProfile", "metadataCapacityReport" };
+                int present = extension.Count(members.ContainsKey);
+                Check(present == 0 || present == extension.Length, "Partial R01 metadata capability declaration.");
+            }
             object instance = Activator.CreateInstance(type);
-            foreach (FieldInfo field in fields) field.SetValue(instance, ConvertValue(members[field.Name], field.FieldType, depth + 1));
+            foreach (FieldInfo field in fields)
+                if (members.ContainsKey(field.Name)) field.SetValue(instance, ConvertValue(members[field.Name], field.FieldType, depth + 1));
             return instance;
+        }
+
+        private static bool IsLegacyExtension(Type type, string name)
+        {
+            return (type == typeof(ShadowPatchManifest) &&
+                (name == "nativeBudgetCapabilityVersion" || name == "metadataEncodingProfile" || name == "metadataCapacityReport")) ||
+                (type == typeof(ShadowPatchAssembly) && name == "dllSize");
         }
 
         private void Space() { while (position < text.Length && " \r\n\t".IndexOf(text[position]) >= 0) ++position; }
@@ -88,9 +114,12 @@ namespace HybridCLR.Editor.AssemblyShadow
             Check(position < text.Length && text[position] >= '0' && text[position] <= '9', "Expected Int32 JSON number.");
             if (text[position] == '0') ++position;
             else while (position < text.Length && text[position] >= '0' && text[position] <= '9') ++position;
+            string token = text.Substring(start, position - start);
             int number;
-            Check(int.TryParse(text.Substring(start, position - start), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out number), "JSON integer overflow.");
-            return number;
+            if (int.TryParse(token, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out number)) return number;
+            ulong unsigned;
+            Check(ulong.TryParse(token, NumberStyles.None, CultureInfo.InvariantCulture, out unsigned), "JSON integer overflow.");
+            return unsigned;
         }
 
         private string String()

@@ -141,5 +141,77 @@ namespace HybridCLR
         [MethodImpl(MethodImplOptions.InternalCall)]
         public static extern AssemblyShadowErrorCode GetExecutionDiagnosticsJson(out string json);
 #endif
+
+        /// <summary>
+        /// Queries the shared metadata index budget for an ordered DLL size list.
+        /// Capability negotiation reads the existing diagnostics snapshot before
+        /// invoking the additive internal call.
+        /// </summary>
+#if UNITY_EDITOR || !ENABLE_IL2CPP
+        public static AssemblyShadowErrorCode GetMetadataCapacityJson(long[] dllSizes, out string json)
+        {
+            json = null;
+            throw new NotSupportedException("Assembly Shadow requires a native IL2CPP Player; Editor and Mono execution are unsupported.");
+        }
+#else
+        public static AssemblyShadowErrorCode GetMetadataCapacityJson(long[] dllSizes, out string json)
+        {
+            json = null;
+            AssemblyShadowErrorCode capability = NegotiateCapability(false);
+            if (capability != AssemblyShadowErrorCode.Success)
+                return capability;
+            return GetMetadataCapacityJsonInternal(dllSizes, out json);
+        }
+#endif
+
+        /// <summary>Reserves a complete ordered metadata budget transactionally.</summary>
+#if UNITY_EDITOR || !ENABLE_IL2CPP
+        public static AssemblyShadowErrorCode ReserveMetadataBudget(long[] orderedDllSizes, int profileVersion = 1)
+            => throw new NotSupportedException("Assembly Shadow requires a native IL2CPP Player; Editor and Mono execution are unsupported.");
+#else
+        public static AssemblyShadowErrorCode ReserveMetadataBudget(long[] orderedDllSizes, int profileVersion = 1)
+        {
+            AssemblyShadowErrorCode capability = NegotiateCapability(false);
+            if (capability != AssemblyShadowErrorCode.Success)
+                return capability;
+            return ReserveMetadataBudgetInternal(orderedDllSizes, profileVersion);
+        }
+#endif
+
+        /// <summary>Queries the state based recovery disposition without mutating the runtime.</summary>
+#if UNITY_EDITOR || !ENABLE_IL2CPP
+        public static AssemblyShadowErrorCode GetRecoveryInfoJson(out string json)
+        {
+            json = null;
+            throw new NotSupportedException("Assembly Shadow requires a native IL2CPP Player; Editor and Mono execution are unsupported.");
+        }
+#else
+        public static AssemblyShadowErrorCode GetRecoveryInfoJson(out string json)
+        {
+            json = null;
+            AssemblyShadowErrorCode capability = NegotiateCapability(true);
+            if (capability != AssemblyShadowErrorCode.Success)
+                return capability;
+            return GetRecoveryInfoJsonInternal(out json);
+        }
+#endif
+
+#if !UNITY_EDITOR && ENABLE_IL2CPP
+        private static AssemblyShadowErrorCode NegotiateCapability(bool recovery)
+        {
+            string diagnosticsJson;
+            AssemblyShadowErrorCode diagnosticsCode = GetDiagnosticsJson(out diagnosticsJson);
+            return AssemblyShadowRuntimeCapabilityNegotiation.Negotiate(diagnosticsJson, diagnosticsCode, recovery);
+        }
+
+        [Preserve, MethodImpl(MethodImplOptions.InternalCall)]
+        private static extern AssemblyShadowErrorCode GetMetadataCapacityJsonInternal(long[] dllSizes, out string json);
+
+        [Preserve, MethodImpl(MethodImplOptions.InternalCall)]
+        private static extern AssemblyShadowErrorCode ReserveMetadataBudgetInternal(long[] orderedDllSizes, int profileVersion);
+
+        [Preserve, MethodImpl(MethodImplOptions.InternalCall)]
+        private static extern AssemblyShadowErrorCode GetRecoveryInfoJsonInternal(out string json);
+#endif
     }
 }

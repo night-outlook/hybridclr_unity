@@ -1,4 +1,5 @@
 ﻿using HybridCLR.Editor.ABI;
+using HybridCLR.Editor.AssemblyShadow;
 using HybridCLR.Editor.Template;
 using System;
 using System.Collections.Generic;
@@ -16,6 +17,8 @@ namespace HybridCLR.Editor.Il2CppDef
         public class Options
         {
             public List<string> HotUpdateAssemblies { get; set; }
+
+            public List<string> AssemblyShadowStartupCandidates { get; set; } = new List<string>();
 
             public string UnityVersionTemplateFile { get; set; }
 
@@ -99,9 +102,64 @@ namespace HybridCLR.Editor.Il2CppDef
             }
 
             frr.Replace("PLACE_HOLDER", string.Join("\n", lines));
+            frr.Replace("ASSEMBLY_SHADOW_STARTUP_CANDIDATES", BuildStartupCandidateLines(_options.AssemblyShadowStartupCandidates));
 
             frr.Commit(_options.AssemblyManifestOutputFile);
             Debug.Log($"[HybridCLR.Editor.Il2CppDef.Generator] output:{_options.AssemblyManifestOutputFile}");
+        }
+
+        private static string BuildStartupCandidateLines(IEnumerable<string> candidates)
+        {
+            var values = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string candidate in candidates ?? Enumerable.Empty<string>())
+            {
+                ValidateStartupCandidate(candidate);
+                if (!seen.Add(candidate))
+                    throw new ShadowBuildException("DuplicateStartupCandidate", "Assembly Shadow startup candidate names must be unique case-insensitively: " + candidate);
+                values.Add(candidate);
+            }
+
+            values.Sort(StringComparer.Ordinal);
+            return string.Join("\n", values.Select(value => "\t\t" + ToCppStringLiteral(value) + ","));
+        }
+
+        private static void ValidateStartupCandidate(string candidate)
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
+                throw new ShadowBuildException("InvalidStartupCandidate", "Assembly Shadow startup candidate names must be non-empty.");
+            if (candidate.Trim() != candidate)
+                throw new ShadowBuildException("InvalidStartupCandidate", "Assembly Shadow startup candidate names must not have leading or trailing whitespace: " + candidate);
+            if (candidate.IndexOf('\0') >= 0)
+                throw new ShadowBuildException("InvalidStartupCandidate", "Assembly Shadow startup candidate names must not contain a NUL character.");
+        }
+
+        private static string ToCppStringLiteral(string value)
+        {
+            var result = new StringBuilder(value.Length + 2);
+            result.Append('"');
+            foreach (char character in value)
+            {
+                switch (character)
+                {
+                    case '"': result.Append("\\\""); break;
+                    case '\\': result.Append("\\\\"); break;
+                    case '\n': result.Append("\\n"); break;
+                    case '\r': result.Append("\\r"); break;
+                    case '\t': result.Append("\\t"); break;
+                    case '\b': result.Append("\\b"); break;
+                    case '\f': result.Append("\\f"); break;
+                    case '\v': result.Append("\\v"); break;
+                    default:
+                        if (char.IsControl(character))
+                            result.Append("\\u").Append(((int)character).ToString("x4"));
+                        else
+                            result.Append(character);
+                        break;
+                }
+            }
+            result.Append('"');
+            return result.ToString();
         }
     }
 }

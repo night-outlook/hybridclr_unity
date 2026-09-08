@@ -78,6 +78,35 @@ namespace HybridCLR.Editor.AssemblyShadow
                 // Warmup never authorizes a patch. It is checked only after the
                 // complete existing policy/resource proof, before any output.
                 var verifiedWarmup = warmup == null ? null : ShadowWarmupValidator.ValidateAndClone(warmup, set, closure);
+                // R01 capacity admission is a new capability gate. Keep it after
+                // the existing resource and compiled-policy checks so legacy
+                // rejection ordering remains observable, then fail closed for a
+                // baseline that cannot prove the native budget capability.
+                ShadowHash.Require(baseline.metadataEncodingProfile != null && baseline.metadataCapacityReport != null,
+                    "CapabilityMissing", "The baseline has no version 1 metadata capacity profile; rebuild it with the installed R01 native helper.");
+                var profile = baseline.metadataEncodingProfile;
+                profile.ValidateOrThrow();
+                ShadowHash.Require(!string.IsNullOrWhiteSpace(profile.nativeHelperSha256) &&
+                    string.Equals(profile.nativeSourceRevision, baseline.sourcePins.hybridclr.revision, StringComparison.OrdinalIgnoreCase),
+                    "CapabilityMissing", "Baseline metadata capacity profile is not bound to its native source pin.");
+                ShadowHash.Require(baseline.nativeBudgetCapabilityVersion == 1 && baseline.metadataCapacityReport.profileVersion == 1 && baseline.metadataCapacityReport.nativeBudgetCapabilityVersion == 1 &&
+                    baseline.metadataCapacityReport.fits && baseline.metadataCapacityReport.cursorsAfter != null && baseline.metadataCapacityReport.cursorsAfter.Length == 4 &&
+                    baseline.metadataCapacityReport.runtimeReserveMetadataBudget &&
+                    string.Equals(baseline.metadataCapacityReport.nativeSourceRevision, profile.nativeSourceRevision, StringComparison.OrdinalIgnoreCase),
+                    "CapabilityMissing", "Baseline metadata capacity report does not advertise native budget capability version 1.");
+                // The runtime performs the reservation before its first Stage
+                // call. The Editor report records that mandatory R01 contract;
+                // the runtime loader supplies any actual runtime cursor
+                // evidence and this build admission remains an estimate.
+                uint[] startingCursors = (uint[])baseline.metadataCapacityReport.cursorsAfter.Clone();
+                var closureInputs = MetadataCapacityPlanner.ClosureInputs(request.currentCompileSnapshot, receipt, order);
+                var capacity = MetadataCapacityPlanner.Plan(profile, closureInputs, startingCursors);
+                capacity.ordinaryAssemblyCount = baseline.metadataCapacityReport.ordinaryAssemblyCount;
+                capacity.aotCandidateAssemblyCount = baseline.metadataCapacityReport.aotCandidateAssemblyCount;
+                capacity.runtimeReserveMetadataBudget = true;
+                capacity.runtimeCursorSource = "BaselineOrdinaryPlan";
+                capacity.ordinaryConsumptionIsEstimate = true;
+                MetadataCapacityPlanner.RequireFits(capacity);
                 string temporary = ShadowArtifactWriter.Begin(request.outputDirectory);
                 var entries = closure.Select(name =>
                 {
@@ -86,7 +115,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                     var original = baseline.assemblies.Single(d => AssemblyIdentityUtil.CanonicalName(d.name) == AssemblyIdentityUtil.CanonicalName(name));
                     string relative = "DLLs/" + descriptor.name + ".dll";
                     ShadowArtifactWriter.CopyVerified(ShadowHash.SafeChild(request.currentCompileSnapshot, input.path), temporary, relative, input.sha256);
-                    var entry = new ShadowPatchAssembly { name = descriptor.name, dll = relative, sha256 = input.sha256, semanticHash = descriptor.semanticHash,
+                    var capacityInput = closureInputs.Single(c => AssemblyIdentityUtil.CanonicalName(c.name) == AssemblyIdentityUtil.CanonicalName(name));
+                    var entry = new ShadowPatchAssembly { name = descriptor.name, dll = relative, sha256 = input.sha256, dllSize = capacityInput.dllSize, semanticHash = descriptor.semanticHash,
                         mvid = descriptor.mvid, baselineMvid = original.mvid, references = descriptor.references };
                     if (request.includePdb && !string.IsNullOrEmpty(input.pdbPath))
                     {
@@ -106,6 +136,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                     baselineResourceAbiHash = baseline.resourceAbiHash, resourceAbiHash = ResourceAbiHasher.Compute(resourceAbi), resourceChangeLevel = diff.level.ToString(),
                     dllOnly = request.dllOnly, resourceBundlesRequired = affected, resourceChangeReasons = diff.reasons,
                     changedRoots = roots, loadOrder = order, closure = entries, dependencyGraph = graph.Edges, deferredFacadeReferences = set.DeferredFacadeReferences.ToArray(),
+                    nativeBudgetCapabilityVersion = profile.nativeBudgetCapabilityVersion,
+                    metadataEncodingProfile = profile, metadataCapacityReport = capacity,
                 };
                 object wireManifest = SelectWireManifest(manifest, verifiedWarmup);
                 ShadowArtifactWriter.Json(temporary, "patch-manifest.json", wireManifest);

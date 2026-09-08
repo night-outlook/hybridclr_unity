@@ -52,6 +52,9 @@ namespace HybridCLR.Editor.AssemblyShadow
         public string playerInputSnapshotHash;
         public string playerBuildGuid;
         public string nativeLibrarySha256;
+        public int nativeBudgetCapabilityVersion;
+        public MetadataEncodingProfile metadataEncodingProfile;
+        public MetadataCapacityReport metadataCapacityReport;
         public AssemblyDescriptor[] assemblies;
         public AssemblyDependencyEdge[] dependencyGraph;
         public string[] deferredFacadeReferences = new string[0];
@@ -67,6 +70,7 @@ namespace HybridCLR.Editor.AssemblyShadow
         public string semanticHash;
         public string mvid;
         public string baselineMvid;
+        public ulong dllSize;
         public string pdb;
         public string pdbSha256;
         public string[] references;
@@ -103,6 +107,9 @@ namespace HybridCLR.Editor.AssemblyShadow
         public string[] deferredFacadeReferences = new string[0];
         public bool unsigned = true;
         public string signatureAlgorithm = "None";
+        public int nativeBudgetCapabilityVersion;
+        public MetadataEncodingProfile metadataEncodingProfile;
+        public MetadataCapacityReport metadataCapacityReport;
     }
 
     public sealed class ShadowBaselineBuildRequest

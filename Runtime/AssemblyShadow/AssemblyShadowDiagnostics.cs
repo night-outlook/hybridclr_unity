@@ -14,7 +14,12 @@ namespace HybridCLR
     public sealed class AssemblyShadowDiagnostics
     {
         [Preserve] public int schemaVersion;
+        [Preserve] public int startupCandidateSchemaVersion;
+        [Preserve] public string[] startupCandidateNames;
+        [Preserve] public string startupObservationMode;
         [Preserve] public bool enabled;
+        [Preserve] public int metadataBudgetCapabilityVersion;
+        [Preserve] public int recoveryCapabilityVersion;
         [Preserve] public int runtimeAbiVersion;
         [Preserve] public string state;
         [Preserve] public int stateCode;
@@ -73,6 +78,27 @@ namespace HybridCLR
             {
                 return false;
             }
+        }
+    }
+
+    // Kept separate from the InternalCall declarations so the negotiation
+    // contract can be exercised with captured diagnostics in Editor tests.
+    internal static class AssemblyShadowRuntimeCapabilityNegotiation
+    {
+        internal static AssemblyShadowErrorCode Negotiate(string diagnosticsJson,
+            AssemblyShadowErrorCode diagnosticsCode, bool recovery)
+        {
+            if (diagnosticsCode == AssemblyShadowErrorCode.FeatureDisabled)
+                return AssemblyShadowErrorCode.FeatureDisabled;
+            if (diagnosticsCode != AssemblyShadowErrorCode.Success ||
+                !AssemblyShadowDiagnostics.TryParse(diagnosticsJson, out AssemblyShadowDiagnostics diagnostics) ||
+                diagnostics.schemaVersion != 1 || !diagnostics.enabled)
+                return AssemblyShadowErrorCode.CapabilityUnavailable;
+
+            int capabilityVersion = recovery ? diagnostics.recoveryCapabilityVersion :
+                diagnostics.metadataBudgetCapabilityVersion;
+            return capabilityVersion == 1 ? AssemblyShadowErrorCode.Success :
+                AssemblyShadowErrorCode.CapabilityUnavailable;
         }
     }
 

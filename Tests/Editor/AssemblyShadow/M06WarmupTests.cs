@@ -185,6 +185,33 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             }
         }
 
+        [Test] public void SchemaTwoLegacyExtensionsAndUnsignedDllSizesRemainStrict()
+        {
+            using (var fixture = new Fixture())
+            {
+                string path = fixture.Artifact(fixture.Plan());
+                string current = File.ReadAllText(path);
+                string historical = current.Replace(",\"nativeBudgetCapabilityVersion\":0,\"metadataEncodingProfile\":null,\"metadataCapacityReport\":null", "")
+                    .Replace(",\"dllSize\":0", "");
+                Assert.AreNotEqual(current, historical);
+                fixture.Rewrite(path, historical);
+                Assert.AreEqual(0, ShadowWarmupManifestReader.ReadAndVerify(path, fixture.Inputs).BaseManifest.nativeBudgetCapabilityVersion);
+                Assert.AreEqual(historical, File.ReadAllText(path));
+                long length = new FileInfo(Path.Combine(Path.GetDirectoryName(path), "DLLs/Warmup.dll")).Length;
+                fixture.Rewrite(path, current.Replace("\"dllSize\":0", "\"dllSize\":" + length));
+                Assert.AreEqual((ulong)length, ShadowWarmupManifestReader.ReadAndVerify(path, fixture.Inputs).BaseManifest.closure[0].dllSize);
+                foreach (string invalid in new[] { "-1", "true", "\"1\"", "18446744073709551615", "18446744073709551616" })
+                {
+                    fixture.Rewrite(path, current.Replace("\"dllSize\":0", "\"dllSize\":" + invalid));
+                    Assert.Throws<ShadowBuildException>(() => ShadowWarmupManifestReader.ReadAndVerify(path, fixture.Inputs));
+                }
+                fixture.Rewrite(path, current.Replace("\"nativeBudgetCapabilityVersion\":0", "\"nativeBudgetCapabilityVersion\":1"));
+                AssertCode("WarmupManifestSchema", () => ShadowWarmupManifestReader.ReadAndVerify(path, fixture.Inputs));
+                fixture.Rewrite(path, current.Replace(",\"metadataCapacityReport\":null", ""));
+                AssertCode("WarmupManifestSchema", () => ShadowWarmupManifestReader.ReadAndVerify(path, fixture.Inputs));
+            }
+        }
+
         [Test] public void RehashedMissingFalseZeroUnknownDuplicateAndNullSchemaTwoFieldsFail()
         {
             using (var fixture = new Fixture())
@@ -252,7 +279,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
 
         [Test] public void LegacyDtoFieldInventoryAndEarlyBuilderValidationRemainSealed()
         {
-            const string fields = "schemaVersion semanticHashSchema patchId baselineBuildId baselineManifestSha256 unityVersion target architecture sourcePins runtimeAbiHash compileSnapshotHash reflectionBindingConfigurationSha256 reflectionBindingConfigurationHash reflectionBindings bootstrapAbiHash baselineResourceAbiHash resourceAbiHash resourceChangeLevel dllOnly resourceBundlesRequired resourceChangeReasons changedRoots loadOrder closure dependencyGraph deferredFacadeReferences unsigned signatureAlgorithm";
+            const string fields = "schemaVersion semanticHashSchema patchId baselineBuildId baselineManifestSha256 unityVersion target architecture sourcePins runtimeAbiHash compileSnapshotHash reflectionBindingConfigurationSha256 reflectionBindingConfigurationHash reflectionBindings bootstrapAbiHash baselineResourceAbiHash resourceAbiHash resourceChangeLevel dllOnly resourceBundlesRequired resourceChangeReasons changedRoots loadOrder closure dependencyGraph deferredFacadeReferences unsigned signatureAlgorithm nativeBudgetCapabilityVersion metadataEncodingProfile metadataCapacityReport";
             CollectionAssert.AreEqual(fields.Split(' '), typeof(ShadowPatchManifest).GetFields().Select(field => field.Name).ToArray());
             AssertCode("InvalidPatchRequest", () => ShadowPatchManifestBuilder.Build(null));
             AssertCode("InvalidPatchRequest", () => ShadowPatchManifestBuilder.BuildWithWarmup(null, new ShadowWarmupPlan()));
@@ -338,9 +365,10 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             if (value == null) return "null";
             if (value is string) return "\"" + ((string)value).Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
             if (value is bool) return (bool)value ? "true" : "false";
-            if (value is int) return value.ToString();
+            if (value is int || value is uint || value is ulong)
+                return ((IFormattable)value).ToString(null, System.Globalization.CultureInfo.InvariantCulture);
             if (value is Array) return "[" + string.Join(",", ((Array)value).Cast<object>().Select(Json).ToArray()) + "]";
-            return "{" + string.Join(",", value.GetType().GetFields().Select(field => Json(field.Name) + ":" + Json(field.GetValue(value))).ToArray()) + "}";
+            return "{" + string.Join(",", value.GetType().GetFields(BindingFlags.Public | BindingFlags.Instance).Select(field => Json(field.Name) + ":" + Json(field.GetValue(value))).ToArray()) + "}";
         }
     }
 }

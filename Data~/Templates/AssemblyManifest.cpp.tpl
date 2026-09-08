@@ -1,4 +1,5 @@
 #include "../Il2CppCompatibleDef.h"
+#include <cstdint>
 
 namespace hybridclr
 {
@@ -7,6 +8,15 @@ namespace hybridclr
 		//!!!{{PLACE_HOLDER
 
 		//!!!}}PLACE_HOLDER
+		nullptr,
+	};
+
+	extern const uint32_t g_assemblyShadowStartupCandidateSchemaVersion = 1;
+	const char* g_assemblyShadowStartupCandidates[] =
+	{
+		//!!!{{ASSEMBLY_SHADOW_STARTUP_CANDIDATES
+
+		//!!!}}ASSEMBLY_SHADOW_STARTUP_CANDIDATES
 		nullptr,
 	};
 }
