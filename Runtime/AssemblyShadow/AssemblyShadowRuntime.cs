@@ -144,8 +144,9 @@ namespace HybridCLR
 
         /// <summary>
         /// Queries the profile 2 shared metadata index budget for an ordered DLL
-        /// size list. Capability negotiation reads the existing diagnostics
-        /// snapshot before invoking the additive internal call.
+        /// size list. Capability negotiation reads a live, constant-size native
+        /// runtime option before invoking the additive internal call. Older
+        /// natives retain the strict diagnostics negotiation fallback.
         /// </summary>
 #if UNITY_EDITOR || !ENABLE_IL2CPP
         public static AssemblyShadowErrorCode GetMetadataCapacityJson(long[] dllSizes, out string json)
@@ -203,9 +204,8 @@ namespace HybridCLR
 #if !UNITY_EDITOR && ENABLE_IL2CPP
         private static AssemblyShadowErrorCode NegotiateCapability(bool recovery, int requiredCapabilityVersion)
         {
-            string diagnosticsJson;
-            AssemblyShadowErrorCode diagnosticsCode = GetDiagnosticsJson(out diagnosticsJson);
-            return AssemblyShadowRuntimeCapabilityNegotiation.Negotiate(diagnosticsJson, diagnosticsCode, recovery, requiredCapabilityVersion);
+            return AssemblyShadowRuntimeCapabilityNegotiation.NegotiateLive(
+                RuntimeApi.GetRuntimeOption, GetDiagnosticsJson, recovery, requiredCapabilityVersion);
         }
 
         [Preserve, MethodImpl(MethodImplOptions.InternalCall)]

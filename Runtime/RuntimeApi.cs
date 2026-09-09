@@ -161,6 +161,10 @@ namespace HybridCLR
         /// <param name="value"></param>
         public static void SetRuntimeOption(RuntimeOptionId optionId, int value)
         {
+            if (optionId == RuntimeOptionId.AssemblyShadowMetadataBudgetCapabilityVersion ||
+                optionId == RuntimeOptionId.AssemblyShadowRecoveryCapabilityVersion)
+                throw new ArgumentException("read-only runtime option id",
+                    ((int)optionId).ToString(System.Globalization.CultureInfo.InvariantCulture));
             s_runtimeOptions[optionId] = value;
         }
 #else
@@ -176,6 +180,11 @@ namespace HybridCLR
 #if UNITY_EDITOR
         public static int GetRuntimeOption(RuntimeOptionId optionId)
         {
+            // Editor has no native Assembly Shadow capability. Keep these
+            // read-only values independent of the configurable option mock.
+            if (optionId == RuntimeOptionId.AssemblyShadowMetadataBudgetCapabilityVersion ||
+                optionId == RuntimeOptionId.AssemblyShadowRecoveryCapabilityVersion)
+                return 0;
             if (s_runtimeOptions.TryGetValue(optionId, out var value))
             {
                 return value;

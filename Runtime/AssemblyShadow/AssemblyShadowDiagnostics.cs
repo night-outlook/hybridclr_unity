@@ -85,6 +85,45 @@ namespace HybridCLR
     // contract can be exercised with captured diagnostics in Editor tests.
     internal static class AssemblyShadowRuntimeCapabilityNegotiation
     {
+        internal delegate AssemblyShadowErrorCode DiagnosticsProvider(out string json);
+
+        internal static AssemblyShadowErrorCode NegotiateLive(Func<RuntimeOptionId, int> readOption,
+            DiagnosticsProvider readLegacyDiagnostics, bool recovery, int requiredCapabilityVersion)
+        {
+            RuntimeOptionId option = recovery ? RuntimeOptionId.AssemblyShadowRecoveryCapabilityVersion :
+                RuntimeOptionId.AssemblyShadowMetadataBudgetCapabilityVersion;
+            try
+            {
+                // Query every time: neither native capability nor failure is cached.
+                int version = readOption(option);
+                if (version == 0) return AssemblyShadowErrorCode.FeatureDisabled;
+                return (requiredCapabilityVersion == 1 || requiredCapabilityVersion == 2) &&
+                    version == requiredCapabilityVersion ? AssemblyShadowErrorCode.Success :
+                    AssemblyShadowErrorCode.CapabilityUnavailable;
+            }
+            catch (ArgumentException error) when (IsUnknownLegacyOption(error, option))
+            {
+                // The established icall exists in older natives; its precise
+                // unknown-option exception is the compatibility discriminator.
+                // Other native errors must not fall back to a different truth.
+                try
+                {
+                    string json;
+                    AssemblyShadowErrorCode code = readLegacyDiagnostics(out json);
+                    return Negotiate(json, code, recovery, requiredCapabilityVersion);
+                }
+                catch (Exception) { return AssemblyShadowErrorCode.CapabilityUnavailable; }
+            }
+            catch (Exception) { return AssemblyShadowErrorCode.CapabilityUnavailable; }
+        }
+
+        private static bool IsUnknownLegacyOption(ArgumentException error, RuntimeOptionId option)
+        {
+            return error.GetType() == typeof(ArgumentException) &&
+                error.ParamName == ((int)option).ToString(System.Globalization.CultureInfo.InvariantCulture) &&
+                error.Message.StartsWith("invalid runtime option id", StringComparison.Ordinal);
+        }
+
         internal static AssemblyShadowErrorCode Negotiate(string diagnosticsJson,
             AssemblyShadowErrorCode diagnosticsCode, bool recovery, int requiredCapabilityVersion)
         {

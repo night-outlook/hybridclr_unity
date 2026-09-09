@@ -6,6 +6,119 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
 {
     public sealed class R01EarlyCapabilityNegotiationTests
     {
+#if UNITY_EDITOR
+        [Test]
+        public void EditorCapabilityOptionsAreReadOnlyAndReportNoNativeCapability()
+        {
+            foreach (RuntimeOptionId option in new[] { RuntimeOptionId.AssemblyShadowMetadataBudgetCapabilityVersion,
+                RuntimeOptionId.AssemblyShadowRecoveryCapabilityVersion })
+            {
+                Assert.That(RuntimeApi.GetRuntimeOption(option), Is.Zero);
+                ArgumentException error = Assert.Throws<ArgumentException>(() => RuntimeApi.SetRuntimeOption(option, 2));
+                Assert.That(error.ParamName, Is.EqualTo(((int)option).ToString()));
+                Assert.That(RuntimeApi.GetRuntimeOption(option), Is.Zero);
+            }
+        }
+#endif
+
+        [Test]
+        public void LiveCapabilitiesDoNotDependOnGrowingDiagnosticSnapshotsOrCacheTruth()
+        {
+            int reads = 0, legacyReads = 0;
+            int metadataVersion = 2;
+            Func<RuntimeOptionId, int> reader = option =>
+            {
+                ++reads;
+                return option == RuntimeOptionId.AssemblyShadowMetadataBudgetCapabilityVersion ? metadataVersion : 1;
+            };
+            LegacyProvider diagnostics = (out string json) =>
+            {
+                ++legacyReads;
+                json = new string(' ', 4 * 1024 * 1024 + 1);
+                return AssemblyShadowErrorCode.Success;
+            };
+            for (int loadedImages = 0; loadedImages <= 8192; ++loadedImages)
+                Assert.That(NegotiateLive(reader, diagnostics, false, 2), Is.EqualTo(AssemblyShadowErrorCode.Success));
+            Assert.That(reads, Is.EqualTo(8193));
+            Assert.That(legacyReads, Is.Zero);
+            metadataVersion = 0;
+            Assert.That(NegotiateLive(reader, diagnostics, false, 2), Is.EqualTo(AssemblyShadowErrorCode.FeatureDisabled));
+            metadataVersion = -1;
+            Assert.That(NegotiateLive(reader, diagnostics, false, 2), Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
+            metadataVersion = 3;
+            Assert.That(NegotiateLive(reader, diagnostics, false, 3), Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
+            metadataVersion = 1;
+            Assert.That(NegotiateLive(reader, diagnostics, false, 2), Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
+            Assert.That(NegotiateLive(reader, diagnostics, true, 1), Is.EqualTo(AssemblyShadowErrorCode.Success));
+            Assert.That(legacyReads, Is.Zero);
+        }
+
+        [Test]
+        public void OnlyTheExactLegacyUnknownOptionExceptionPermitsFallback()
+        {
+            int legacyReads = 0;
+            LegacyProvider diagnostics = (out string json) =>
+            {
+                ++legacyReads;
+                json = Diagnostics(2, 1);
+                return AssemblyShadowErrorCode.Success;
+            };
+            Func<RuntimeOptionId, int> oldNative = option =>
+            {
+                throw new ArgumentException("invalid runtime option id", ((int)option).ToString());
+            };
+            Assert.That(NegotiateLive(oldNative, diagnostics, false, 2), Is.EqualTo(AssemblyShadowErrorCode.Success));
+            Assert.That(NegotiateLive(oldNative, diagnostics, true, 1), Is.EqualTo(AssemblyShadowErrorCode.Success));
+            Assert.That(legacyReads, Is.EqualTo(2));
+            foreach (Exception failure in new Exception[]
+            {
+                new InvalidOperationException("native failure"),
+                new ArgumentException("another native failure", "7"),
+                new ArgumentException("invalid runtime option id", "8"),
+                new ArgumentNullException("7", "invalid runtime option id"),
+                new ArgumentException("invalid runtime option id"),
+            })
+                Assert.That(NegotiateLive(option => { throw failure; }, diagnostics, false, 2),
+                    Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
+            Assert.That(legacyReads, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void LegacyFallbackRetainsDisabledProfileAndResourceBoundSemantics()
+        {
+            Func<RuntimeOptionId, int> oldNative = option =>
+            {
+                throw new ArgumentException("invalid runtime option id", ((int)option).ToString());
+            };
+            Assert.That(NegotiateLive(oldNative, (out string json) =>
+            {
+                json = "invalid";
+                return AssemblyShadowErrorCode.FeatureDisabled;
+            }, false, 2), Is.EqualTo(AssemblyShadowErrorCode.FeatureDisabled));
+            Assert.That(NegotiateLive(oldNative, (out string json) =>
+            {
+                json = Minimal();
+                return AssemblyShadowErrorCode.Success;
+            }, false, 2), Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
+            Assert.That(NegotiateLive(oldNative, (out string json) =>
+            {
+                json = new string(' ', 4 * 1024 * 1024 + 1);
+                return AssemblyShadowErrorCode.Success;
+            }, false, 2), Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
+        }
+
+        private delegate AssemblyShadowErrorCode LegacyProvider(out string json);
+
+        private static AssemblyShadowErrorCode NegotiateLive(Func<RuntimeOptionId, int> reader,
+            LegacyProvider legacy, bool recovery, int requiredVersion)
+        {
+            MethodInfo method = typeof(AssemblyShadowDiagnostics).Assembly
+                .GetType("HybridCLR.AssemblyShadowRuntimeCapabilityNegotiation", true)
+                .GetMethod("NegotiateLive", BindingFlags.Static | BindingFlags.NonPublic);
+            Delegate provider = Delegate.CreateDelegate(method.GetParameters()[1].ParameterType, legacy.Target, legacy.Method);
+            return (AssemblyShadowErrorCode)method.Invoke(null, new object[] { reader, provider, recovery, requiredVersion });
+        }
+
         [Test]
         public void MinimalAndFullDiagnosticsNegotiateWithoutUnityJsonUtility()
         {
