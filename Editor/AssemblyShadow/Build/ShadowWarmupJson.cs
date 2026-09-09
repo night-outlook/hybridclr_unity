@@ -44,7 +44,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                 Check(number <= uint.MaxValue, "UInt32 JSON integer overflow.");
                 return (uint)number;
             }
-            if (value == null && (type == typeof(MetadataEncodingProfile) || type == typeof(MetadataCapacityReport)))
+            if (value == null && (type == typeof(MetadataEncodingProfile) || type == typeof(MetadataCapacityReport) ||
+                type == typeof(MetadataEncodingProfile2) || type == typeof(MetadataCapacityProfile2PreliminaryReport)))
                 return null; // Absent R01 capability on a legacy schema-2 patch.
             if (type.IsArray)
             {
@@ -61,9 +62,39 @@ namespace HybridCLR.Editor.AssemblyShadow
                 "Missing/unknown DTO field or null object.");
             if (type == typeof(ShadowPatchManifest))
             {
-                string[] extension = { "nativeBudgetCapabilityVersion", "metadataEncodingProfile", "metadataCapacityReport" };
-                int present = extension.Count(members.ContainsKey);
-                Check(present == 0 || present == extension.Length, "Partial R01 metadata capability declaration.");
+                string[] profile1 = { "metadataEncodingProfile", "metadataCapacityReport" };
+                string[] profile2 = { "metadataEncodingProfile2", "metadataCapacityReport2" };
+                int present1 = profile1.Count(members.ContainsKey);
+                int present2 = profile2.Count(members.ContainsKey);
+                bool hasCapability = members.ContainsKey("nativeBudgetCapabilityVersion");
+                Check((present1 == 0 || present1 == profile1.Length) && (present2 == 0 || present2 == profile2.Length),
+                    "Partial metadata capability field pair.");
+                Type[] profile1Types = { typeof(MetadataEncodingProfile), typeof(MetadataCapacityReport) };
+                Type[] profile2Types = { typeof(MetadataEncodingProfile2), typeof(MetadataCapacityProfile2PreliminaryReport) };
+                bool dormant1 = present1 == profile1.Length && Enumerable.Range(0, profile1.Length)
+                    .All(index => MatchesDefaultWireValue(members[profile1[index]], null, profile1Types[index], 0));
+                bool dormant2 = present2 == profile2.Length && Enumerable.Range(0, profile2.Length)
+                    .All(index => MatchesDefaultWireValue(members[profile2[index]], null, profile2Types[index], 0));
+                bool active1 = present1 == profile1.Length && Enumerable.Range(0, profile1.Length)
+                    .All(index => !MatchesDefaultWireValue(members[profile1[index]], null, profile1Types[index], 0));
+                bool active2 = present2 == profile2.Length && Enumerable.Range(0, profile2.Length)
+                    .All(index => !MatchesDefaultWireValue(members[profile2[index]], null, profile2Types[index], 0));
+                Check(present1 == 0 || active1 || dormant1,
+                    "Partial metadata profile 1 value pair.");
+                Check(present2 == 0 || active2 || dormant2,
+                    "Partial metadata profile 2 value pair.");
+                Check(!(active1 && active2), "Mixed metadata capability profiles are unsupported.");
+                if (hasCapability)
+                {
+                    Check(members["nativeBudgetCapabilityVersion"] is int, "Metadata capability version must be an integer.");
+                    int capability = (int)members["nativeBudgetCapabilityVersion"];
+                    Check((capability == 0 && !active1 && !active2) || (capability == 1 && active1 && !active2) ||
+                        (capability == 2 && active2 && !active1), "Metadata capability version does not match its profile fields.");
+                }
+                else
+                {
+                    Check(present1 == 0 && present2 == 0, "Metadata profile fields require an explicit capability version.");
+                }
             }
             object instance = Activator.CreateInstance(type);
             foreach (FieldInfo field in fields)
@@ -71,10 +102,47 @@ namespace HybridCLR.Editor.AssemblyShadow
             return instance;
         }
 
+        // Unity's JsonUtility materializes null serializable class fields as
+        // recursively default-valued objects in an enclosing DTO. Treat only
+        // that exact wire shape as dormant; a partly populated inactive
+        // profile remains invalid and cannot be confused with the active pair.
+        private static bool MatchesDefaultWireValue(object value, object expected, Type type, int depth)
+        {
+            Check(depth <= 32, "Oversized default extension nesting.");
+            if (type == typeof(string))
+                return value == null ? expected == null : value is string && (string)value == (string)(expected ?? string.Empty);
+            if (type == typeof(bool)) return value is bool && (bool)value == (bool)expected;
+            if (type == typeof(int)) return value is int && (int)value == (int)expected;
+            if (type == typeof(uint) || type == typeof(ulong))
+            {
+                ulong actual = value is ulong ? (ulong)value : value is int && (int)value >= 0 ? (ulong)(int)value : ulong.MaxValue;
+                ulong wanted = type == typeof(uint) ? (uint)expected : (ulong)expected;
+                return actual == wanted;
+            }
+            if (type.IsArray)
+            {
+                var list = value as List<object>;
+                var expectedArray = expected as Array;
+                if (list == null || expectedArray == null || list.Count != expectedArray.Length) return false;
+                Type element = type.GetElementType();
+                for (int index = 0; index < list.Count; ++index)
+                    if (!MatchesDefaultWireValue(list[index], expectedArray.GetValue(index), element, depth + 1)) return false;
+                return true;
+            }
+            var members = value as Dictionary<string, object>;
+            if (members == null) return value == null;
+            object defaults = expected ?? Activator.CreateInstance(type);
+            FieldInfo[] fields = type.GetFields(BindingFlags.Public | BindingFlags.Instance);
+            if (members.Count != fields.Length || fields.Any(field => !members.ContainsKey(field.Name))) return false;
+            return fields.All(field => MatchesDefaultWireValue(
+                members[field.Name], field.GetValue(defaults), field.FieldType, depth + 1));
+        }
+
         private static bool IsLegacyExtension(Type type, string name)
         {
             return (type == typeof(ShadowPatchManifest) &&
-                (name == "nativeBudgetCapabilityVersion" || name == "metadataEncodingProfile" || name == "metadataCapacityReport")) ||
+                (name == "nativeBudgetCapabilityVersion" || name == "metadataEncodingProfile" || name == "metadataCapacityReport" ||
+                    name == "metadataEncodingProfile2" || name == "metadataCapacityReport2")) ||
                 (type == typeof(ShadowPatchAssembly) && name == "dllSize");
         }
 

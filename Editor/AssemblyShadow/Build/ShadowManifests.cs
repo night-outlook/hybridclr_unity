@@ -55,6 +55,11 @@ namespace HybridCLR.Editor.AssemblyShadow
         public int nativeBudgetCapabilityVersion;
         public MetadataEncodingProfile metadataEncodingProfile;
         public MetadataCapacityReport metadataCapacityReport;
+        // Profile 1 remains readable for historical baselines. Profile 2 is
+        // deliberately represented by distinct DTOs so a sparse-page report
+        // cannot be mistaken for the legacy cursor allocator.
+        public MetadataEncodingProfile2 metadataEncodingProfile2;
+        public MetadataCapacityProfile2PreliminaryReport metadataCapacityReport2;
         public AssemblyDescriptor[] assemblies;
         public AssemblyDependencyEdge[] dependencyGraph;
         public string[] deferredFacadeReferences = new string[0];
@@ -110,6 +115,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         public int nativeBudgetCapabilityVersion;
         public MetadataEncodingProfile metadataEncodingProfile;
         public MetadataCapacityReport metadataCapacityReport;
+        public MetadataEncodingProfile2 metadataEncodingProfile2;
+        public MetadataCapacityProfile2PreliminaryReport metadataCapacityReport2;
     }
 
     public sealed class ShadowBaselineBuildRequest

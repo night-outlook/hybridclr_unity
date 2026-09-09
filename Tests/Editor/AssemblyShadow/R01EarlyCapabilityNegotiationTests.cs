@@ -12,6 +12,24 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             Assert.That(Negotiate(Minimal(), false), Is.EqualTo(AssemblyShadowErrorCode.Success));
             Assert.That(Negotiate(FullDiagnostics(), false), Is.EqualTo(AssemblyShadowErrorCode.Success));
             Assert.That(Negotiate(FullDiagnostics(), true), Is.EqualTo(AssemblyShadowErrorCode.Success));
+            Assert.That(Negotiate(Minimal().Replace("\"metadataBudgetCapabilityVersion\":1", "\"metadataBudgetCapabilityVersion\":2"), false, 2),
+                Is.EqualTo(AssemblyShadowErrorCode.Success));
+            Assert.That(Negotiate(Minimal().Replace("\"recoveryCapabilityVersion\":1", "\"recoveryCapabilityVersion\":2"), true),
+                Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
+        }
+
+        [Test]
+        public void MetadataCapabilityMustMatchTheRequestedProfileExactly()
+        {
+            string capabilityOne = Minimal();
+            string capabilityTwo = capabilityOne.Replace("\"metadataBudgetCapabilityVersion\":1", "\"metadataBudgetCapabilityVersion\":2");
+
+            Assert.That(Negotiate(capabilityOne, false, 1), Is.EqualTo(AssemblyShadowErrorCode.Success));
+            Assert.That(Negotiate(capabilityOne, false, 2), Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
+            Assert.That(Negotiate(capabilityTwo, false, 2), Is.EqualTo(AssemblyShadowErrorCode.Success));
+            Assert.That(Negotiate(capabilityTwo, false, 1), Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
+            Assert.That(Negotiate(capabilityTwo, false, 0), Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
+            Assert.That(Negotiate(Diagnostics(3, 1), false, 3), Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
         }
 
         [Test]
@@ -86,16 +104,18 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         [Test]
         public void FeatureDisabledShortCircuitsMalformedDiagnostics()
         {
-            Assert.That(Negotiate("not json", false, AssemblyShadowErrorCode.FeatureDisabled),
+            Assert.That(Negotiate("not json", false, 2, AssemblyShadowErrorCode.FeatureDisabled),
                 Is.EqualTo(AssemblyShadowErrorCode.FeatureDisabled));
         }
 
-        private static AssemblyShadowErrorCode Negotiate(string json, bool recovery, AssemblyShadowErrorCode diagnosticsCode = AssemblyShadowErrorCode.Success)
+        private static AssemblyShadowErrorCode Negotiate(string json, bool recovery, int requiredCapabilityVersion = 1,
+            AssemblyShadowErrorCode diagnosticsCode = AssemblyShadowErrorCode.Success)
         {
             MethodInfo method = typeof(AssemblyShadowDiagnostics).Assembly
                 .GetType("HybridCLR.AssemblyShadowRuntimeCapabilityNegotiation", true)
-                .GetMethod("Negotiate", BindingFlags.Static | BindingFlags.NonPublic);
-            return (AssemblyShadowErrorCode)method.Invoke(null, new object[] { json, diagnosticsCode, recovery });
+                .GetMethod("Negotiate", BindingFlags.Static | BindingFlags.NonPublic, null,
+                    new[] { typeof(string), typeof(AssemblyShadowErrorCode), typeof(bool), typeof(int) }, null);
+            return (AssemblyShadowErrorCode)method.Invoke(null, new object[] { json, diagnosticsCode, recovery, requiredCapabilityVersion });
         }
 
         private static string Minimal()
@@ -109,6 +129,12 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 "\"generation\":18446744073709551615,\"ordinaryAssemblies\":[{\"name\":\"A\",\"isInterpreter\":false}]," +
                 "\"events\":[{\"sequence\":1,\"kind\":\"x\",\"nested\":[true,null,3.5e+2,{\"deep\":\"value\"}]}]," +
                 "\"unknownObject\":{\"array\":[1,2,{\"leaf\":\"ok\"}]}}";
+        }
+
+        private static string Diagnostics(int metadataBudgetVersion, int recoveryVersion)
+        {
+            return "{\"schemaVersion\":1,\"enabled\":true,\"metadataBudgetCapabilityVersion\":" + metadataBudgetVersion +
+                ",\"recoveryCapabilityVersion\":" + recoveryVersion + "}";
         }
 
         private static string DepthDocument(int nestedObjects)

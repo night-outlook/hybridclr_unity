@@ -27,11 +27,11 @@ namespace HybridCLR
         /// The order must contain exactly the patch closure, each a registered candidate, before any StageAssembly call.
         /// </summary>
 #if UNITY_EDITOR || !ENABLE_IL2CPP
-        public static AssemblyShadowErrorCode BeginTransaction(string patchId, string expectedBaselineBuildId, string[] closureLoadOrder, int runtimeAbiVersion = 1)
+        public static AssemblyShadowErrorCode BeginTransaction(string patchId, string expectedBaselineBuildId, string[] closureLoadOrder, int runtimeAbiVersion = 2)
             => throw new NotSupportedException("Assembly Shadow requires a native IL2CPP Player; Editor and Mono execution are unsupported.");
 #else
         [MethodImpl(MethodImplOptions.InternalCall)]
-        public static extern AssemblyShadowErrorCode BeginTransaction(string patchId, string expectedBaselineBuildId, string[] closureLoadOrder, int runtimeAbiVersion = 1);
+        public static extern AssemblyShadowErrorCode BeginTransaction(string patchId, string expectedBaselineBuildId, string[] closureLoadOrder, int runtimeAbiVersion = 2);
 #endif
 
         /// <summary>
@@ -143,9 +143,9 @@ namespace HybridCLR
 #endif
 
         /// <summary>
-        /// Queries the shared metadata index budget for an ordered DLL size list.
-        /// Capability negotiation reads the existing diagnostics snapshot before
-        /// invoking the additive internal call.
+        /// Queries the profile 2 shared metadata index budget for an ordered DLL
+        /// size list. Capability negotiation reads the existing diagnostics
+        /// snapshot before invoking the additive internal call.
         /// </summary>
 #if UNITY_EDITOR || !ENABLE_IL2CPP
         public static AssemblyShadowErrorCode GetMetadataCapacityJson(long[] dllSizes, out string json)
@@ -157,21 +157,25 @@ namespace HybridCLR
         public static AssemblyShadowErrorCode GetMetadataCapacityJson(long[] dllSizes, out string json)
         {
             json = null;
-            AssemblyShadowErrorCode capability = NegotiateCapability(false);
+            AssemblyShadowErrorCode capability = NegotiateCapability(false, 2);
             if (capability != AssemblyShadowErrorCode.Success)
                 return capability;
             return GetMetadataCapacityJsonInternal(dllSizes, out json);
         }
 #endif
 
-        /// <summary>Reserves a complete ordered metadata budget transactionally.</summary>
+        /// <summary>
+        /// Reserves a complete ordered metadata budget transactionally. The
+        /// requested profile must be explicitly supported by the player: profile
+        /// 1 uses metadata capability 1 and profile 2 uses metadata capability 2.
+        /// </summary>
 #if UNITY_EDITOR || !ENABLE_IL2CPP
-        public static AssemblyShadowErrorCode ReserveMetadataBudget(long[] orderedDllSizes, int profileVersion = 1)
+        public static AssemblyShadowErrorCode ReserveMetadataBudget(long[] orderedDllSizes, int profileVersion = 2)
             => throw new NotSupportedException("Assembly Shadow requires a native IL2CPP Player; Editor and Mono execution are unsupported.");
 #else
-        public static AssemblyShadowErrorCode ReserveMetadataBudget(long[] orderedDllSizes, int profileVersion = 1)
+        public static AssemblyShadowErrorCode ReserveMetadataBudget(long[] orderedDllSizes, int profileVersion = 2)
         {
-            AssemblyShadowErrorCode capability = NegotiateCapability(false);
+            AssemblyShadowErrorCode capability = NegotiateCapability(false, profileVersion);
             if (capability != AssemblyShadowErrorCode.Success)
                 return capability;
             return ReserveMetadataBudgetInternal(orderedDllSizes, profileVersion);
@@ -189,7 +193,7 @@ namespace HybridCLR
         public static AssemblyShadowErrorCode GetRecoveryInfoJson(out string json)
         {
             json = null;
-            AssemblyShadowErrorCode capability = NegotiateCapability(true);
+            AssemblyShadowErrorCode capability = NegotiateCapability(true, 1);
             if (capability != AssemblyShadowErrorCode.Success)
                 return capability;
             return GetRecoveryInfoJsonInternal(out json);
@@ -197,11 +201,11 @@ namespace HybridCLR
 #endif
 
 #if !UNITY_EDITOR && ENABLE_IL2CPP
-        private static AssemblyShadowErrorCode NegotiateCapability(bool recovery)
+        private static AssemblyShadowErrorCode NegotiateCapability(bool recovery, int requiredCapabilityVersion)
         {
             string diagnosticsJson;
             AssemblyShadowErrorCode diagnosticsCode = GetDiagnosticsJson(out diagnosticsJson);
-            return AssemblyShadowRuntimeCapabilityNegotiation.Negotiate(diagnosticsJson, diagnosticsCode, recovery);
+            return AssemblyShadowRuntimeCapabilityNegotiation.Negotiate(diagnosticsJson, diagnosticsCode, recovery, requiredCapabilityVersion);
         }
 
         [Preserve, MethodImpl(MethodImplOptions.InternalCall)]

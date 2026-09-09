@@ -86,7 +86,7 @@ namespace HybridCLR
     internal static class AssemblyShadowRuntimeCapabilityNegotiation
     {
         internal static AssemblyShadowErrorCode Negotiate(string diagnosticsJson,
-            AssemblyShadowErrorCode diagnosticsCode, bool recovery)
+            AssemblyShadowErrorCode diagnosticsCode, bool recovery, int requiredCapabilityVersion)
         {
             if (diagnosticsCode == AssemblyShadowErrorCode.FeatureDisabled)
                 return AssemblyShadowErrorCode.FeatureDisabled;
@@ -95,11 +95,18 @@ namespace HybridCLR
                 !diagnostics.hasSchemaVersion || !diagnostics.hasEnabled || diagnostics.schemaVersion != 1 || !diagnostics.enabled)
                 return AssemblyShadowErrorCode.CapabilityUnavailable;
 
+            // Capability versions describe the exact wire contract for the
+            // requested operation. Do not treat a different profile as a
+            // compatible implementation: profile 1 and profile 2 produce
+            // different metadata index representations.
+            if (requiredCapabilityVersion != 1 && requiredCapabilityVersion != 2)
+                return AssemblyShadowErrorCode.CapabilityUnavailable;
+
             if ((recovery && !diagnostics.hasRecoveryCapabilityVersion) ||
                 (!recovery && !diagnostics.hasMetadataBudgetCapabilityVersion))
                 return AssemblyShadowErrorCode.CapabilityUnavailable;
             int capabilityVersion = recovery ? diagnostics.recoveryCapabilityVersion : diagnostics.metadataBudgetCapabilityVersion;
-            return capabilityVersion == 1 ? AssemblyShadowErrorCode.Success :
+            return capabilityVersion == requiredCapabilityVersion ? AssemblyShadowErrorCode.Success :
                 AssemblyShadowErrorCode.CapabilityUnavailable;
         }
     }

@@ -235,6 +235,136 @@ namespace HybridCLR
         private static FormatException Invalid(string message) { return new FormatException(message); }
     }
 
+    /// <summary>Schema 2 sparse signed-int32 preliminary capacity report.</summary>
+    [Serializable, Preserve]
+    public sealed class AssemblyShadowMetadataCapacityProfile2
+    {
+        [Preserve] public int schemaVersion;
+        [Preserve] public bool enabled;
+        [Preserve] public int profileVersion;
+        [Preserve] public uint maximumImageCount;
+        [Preserve] public ulong maximumDllBytes;
+        [Preserve] public ulong usablePageCapacity;
+        [Preserve] public ulong chargedPageCeiling;
+        [Preserve] public ulong minimumFreePageMargin;
+        [Preserve] public ulong reservedPages;
+        [Preserve] public ulong mappedPages;
+        [Preserve] public ulong lifetimeReservedImageCount;
+        [Preserve] public ulong remainingImageCount;
+        [Preserve] public ulong requiredImages;
+        [Preserve] public ulong acceptedImages;
+        [Preserve] public int firstFailingIndex;
+        [Preserve] public ulong firstFailingSize;
+        [Preserve] public string failureReason;
+        [Preserve] public bool fitsPreliminary;
+        [Preserve] public bool runtimeFinalizationRequired;
+        [Preserve] public ulong aggregateInputDllBytes;
+        [Preserve] public bool aggregateInputDllBytesInformational;
+        [Preserve] public ulong ordinaryAllocatedCount;
+        [Preserve] public ulong shadowAllocatedCount;
+        [Preserve] public ulong reservedShadowImageCount;
+
+        public static AssemblyShadowMetadataCapacityProfile2 Parse(string json)
+        {
+            if (string.IsNullOrEmpty(json))
+                throw new ArgumentException("Metadata capacity JSON must not be null or empty.", nameof(json));
+
+            var reader = new AssemblyShadowStrictJsonReader(json);
+            var result = new AssemblyShadowMetadataCapacityProfile2();
+            var fields = new HashSet<string>(StringComparer.Ordinal);
+            reader.Expect('{');
+            if (!reader.Take('}'))
+            {
+                do
+                {
+                    string field = reader.Field(fields);
+                    switch (field)
+                    {
+                        case "schemaVersion": result.schemaVersion = reader.Integer(); break;
+                        case "enabled": result.enabled = reader.Boolean(); break;
+                        case "profileVersion": result.profileVersion = reader.Integer(); break;
+                        case "maximumImageCount": result.maximumImageCount = ToUInt(reader.Unsigned(), field); break;
+                        case "maximumDllBytes": result.maximumDllBytes = reader.Unsigned(); break;
+                        case "usablePageCapacity": result.usablePageCapacity = reader.Unsigned(); break;
+                        case "chargedPageCeiling": result.chargedPageCeiling = reader.Unsigned(); break;
+                        case "minimumFreePageMargin": result.minimumFreePageMargin = reader.Unsigned(); break;
+                        case "reservedPages": result.reservedPages = reader.Unsigned(); break;
+                        case "mappedPages": result.mappedPages = reader.Unsigned(); break;
+                        case "lifetimeReservedImageCount": result.lifetimeReservedImageCount = reader.Unsigned(); break;
+                        case "remainingImageCount": result.remainingImageCount = reader.Unsigned(); break;
+                        case "requiredImages": result.requiredImages = reader.Unsigned(); break;
+                        case "acceptedImages": result.acceptedImages = reader.Unsigned(); break;
+                        case "firstFailingIndex": result.firstFailingIndex = reader.Integer(); break;
+                        case "firstFailingSize": result.firstFailingSize = reader.Unsigned(); break;
+                        case "failureReason": result.failureReason = reader.String(); break;
+                        case "fitsPreliminary": result.fitsPreliminary = reader.Boolean(); break;
+                        case "runtimeFinalizationRequired": result.runtimeFinalizationRequired = reader.Boolean(); break;
+                        case "aggregateInputDllBytes": result.aggregateInputDllBytes = reader.Unsigned(); break;
+                        case "aggregateInputDllBytesInformational": result.aggregateInputDllBytesInformational = reader.Boolean(); break;
+                        case "ordinaryAllocatedCount": result.ordinaryAllocatedCount = reader.Unsigned(); break;
+                        case "shadowAllocatedCount": result.shadowAllocatedCount = reader.Unsigned(); break;
+                        case "reservedShadowImageCount": result.reservedShadowImageCount = reader.Unsigned(); break;
+                        default: throw Invalid("Unknown profile 2 metadata capacity field: " + field);
+                    }
+                } while (reader.Take(','));
+                reader.Expect('}');
+            }
+            reader.EndDocument();
+            if (fields.Count != 24)
+                throw Invalid("Incomplete profile 2 metadata capacity JSON.");
+            Validate(result);
+            return result;
+        }
+
+        public static bool TryParse(string json, out AssemblyShadowMetadataCapacityProfile2 capacity)
+        {
+            capacity = null;
+            try
+            {
+                capacity = Parse(json);
+                return true;
+            }
+            catch (ArgumentException) { return false; }
+            catch (FormatException) { return false; }
+            catch (Exception) { return false; }
+        }
+
+        private static void Validate(AssemblyShadowMetadataCapacityProfile2 value)
+        {
+            if (value.schemaVersion != 2 || !value.enabled || value.profileVersion != 2 || value.maximumImageCount != 8192 ||
+                value.maximumDllBytes != 33554432UL || value.usablePageCapacity != 524287UL || value.chargedPageCeiling != 393215UL ||
+                value.minimumFreePageMargin != 131072UL || !value.runtimeFinalizationRequired || !value.aggregateInputDllBytesInformational ||
+                value.lifetimeReservedImageCount > value.maximumImageCount ||
+                value.remainingImageCount != value.maximumImageCount - value.lifetimeReservedImageCount ||
+                value.reservedPages > value.chargedPageCeiling || value.mappedPages > value.reservedPages ||
+                value.acceptedImages > value.requiredImages)
+                throw Invalid("Unsupported or inconsistent profile 2 metadata capacity report.");
+
+            if (value.fitsPreliminary)
+            {
+                if (value.requiredImages > value.remainingImageCount || value.firstFailingIndex != -1 ||
+                    value.acceptedImages != value.requiredImages || value.failureReason != "None")
+                    throw Invalid("Successful profile 2 report has a failure marker.");
+            }
+            else
+            {
+                if (value.requiredImages == 0 || value.firstFailingIndex < 0 || (ulong)value.firstFailingIndex >= value.requiredImages ||
+                    value.acceptedImages != 0 ||
+                    (value.failureReason != "EmptyDll" && value.failureReason != "DllTooLarge" && value.failureReason != "ImageLimit" &&
+                        value.failureReason != "InvalidInput" && value.failureReason != "InvalidState"))
+                    throw Invalid("Failed profile 2 report has an invalid failure marker.");
+            }
+        }
+
+        private static uint ToUInt(ulong value, string name)
+        {
+            if (value > uint.MaxValue) throw Invalid(name + " is outside UInt32 range.");
+            return (uint)value;
+        }
+
+        private static FormatException Invalid(string message) { return new FormatException(message); }
+    }
+
     [Serializable, Preserve]
     public sealed class AssemblyShadowMetadataAllocation
     {

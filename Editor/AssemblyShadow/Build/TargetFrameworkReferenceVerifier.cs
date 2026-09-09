@@ -34,7 +34,14 @@ namespace HybridCLR.Editor.AssemblyShadow
                 !string.IsNullOrWhiteSpace(unityVersion) && !string.IsNullOrWhiteSpace(target) && !string.IsNullOrWhiteSpace(architecture) &&
                 !string.IsNullOrWhiteSpace(apiCompatibilityLevel) && receipt.unityVersion == unityVersion && receipt.target == target && receipt.architecture == architecture &&
                 receipt.sourcePins.unityVersion == unityVersion && receipt.sourcePins.target == target && receipt.sourcePins.architecture == architecture,
-                "FrameworkTargetMismatch", "Snapshot, source pins and current Unity target/architecture must match.");
+                "FrameworkTargetMismatch", string.Format("Snapshot, source pins and current Unity target/architecture must match. " +
+                    "snapshot={0}/{1}/{2}; pins={3}/{4}/{5}; current={6}/{7}/{8}",
+                    receipt == null ? "<null>" : receipt.unityVersion, receipt == null ? "<null>" : receipt.target,
+                    receipt == null ? "<null>" : receipt.architecture,
+                    receipt == null || receipt.sourcePins == null ? "<null>" : receipt.sourcePins.unityVersion,
+                    receipt == null || receipt.sourcePins == null ? "<null>" : receipt.sourcePins.target,
+                    receipt == null || receipt.sourcePins == null ? "<null>" : receipt.sourcePins.architecture,
+                    unityVersion, target, architecture));
             ShadowHash.Require(receipt.snapshotHash == AssemblySnapshot.ComputeHash(receipt), "FrameworkSnapshotHashMismatch", "Framework evidence requires unchanged snapshot identity.");
             ShadowHash.Require(!string.IsNullOrWhiteSpace(editorContentsPath) && Path.IsPathRooted(editorContentsPath) &&
                 Directory.Exists(editorContentsPath) && systemDirectories != null && compilerReferences != null,

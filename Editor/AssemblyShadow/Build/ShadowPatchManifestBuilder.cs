@@ -82,31 +82,37 @@ namespace HybridCLR.Editor.AssemblyShadow
                 // the existing resource and compiled-policy checks so legacy
                 // rejection ordering remains observable, then fail closed for a
                 // baseline that cannot prove the native budget capability.
-                ShadowHash.Require(baseline.metadataEncodingProfile != null && baseline.metadataCapacityReport != null,
-                    "CapabilityMissing", "The baseline has no version 1 metadata capacity profile; rebuild it with the installed R01 native helper.");
-                var profile = baseline.metadataEncodingProfile;
-                profile.ValidateOrThrow();
-                ShadowHash.Require(!string.IsNullOrWhiteSpace(profile.nativeHelperSha256) &&
-                    string.Equals(profile.nativeSourceRevision, baseline.sourcePins.hybridclr.revision, StringComparison.OrdinalIgnoreCase),
-                    "CapabilityMissing", "Baseline metadata capacity profile is not bound to its native source pin.");
-                ShadowHash.Require(baseline.nativeBudgetCapabilityVersion == 1 && baseline.metadataCapacityReport.profileVersion == 1 && baseline.metadataCapacityReport.nativeBudgetCapabilityVersion == 1 &&
-                    baseline.metadataCapacityReport.fits && baseline.metadataCapacityReport.cursorsAfter != null && baseline.metadataCapacityReport.cursorsAfter.Length == 4 &&
-                    baseline.metadataCapacityReport.runtimeReserveMetadataBudget &&
-                    string.Equals(baseline.metadataCapacityReport.nativeSourceRevision, profile.nativeSourceRevision, StringComparison.OrdinalIgnoreCase),
-                    "CapabilityMissing", "Baseline metadata capacity report does not advertise native budget capability version 1.");
+                ShadowHash.Require(baseline.nativeBudgetCapabilityVersion == MetadataCapacityProfile2.BudgetCapabilityVersion &&
+                    baseline.metadataEncodingProfile2 != null && baseline.metadataCapacityReport2 != null,
+                    "CapabilityMissing", "The baseline has no explicit profile 2 metadata capacity contract; rebuild it with the installed sparse native codec.");
+                var profile = baseline.metadataEncodingProfile2;
+                ShadowHash.Require(profile.IsValid(), "CapabilityMissing", "Baseline profile 2 metadata encoding identity is invalid.");
+                ShadowHash.Require(string.Equals(profile.nativeSourceRevision, baseline.sourcePins.hybridclr.revision, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(profile.nativeCodecHeaderSha256, baseline.metadataCapacityReport2.nativeCodecHeaderSha256, StringComparison.OrdinalIgnoreCase),
+                    "CapabilityMissing", "Baseline profile 2 metadata capacity is not bound to its native source pin and codec hash.");
+                ShadowHash.Require(baseline.metadataCapacityReport2.profileVersion == MetadataCapacityProfile2.ProfileVersion &&
+                    baseline.metadataCapacityReport2.nativeBudgetCapabilityVersion == MetadataCapacityProfile2.BudgetCapabilityVersion &&
+                    baseline.metadataCapacityReport2.fitsPreliminary && baseline.metadataCapacityReport2.runtimeFinalizationRequired &&
+                    !baseline.metadataCapacityReport2.finalPageFitKnown &&
+                    baseline.metadataCapacityReport2.nativeSourceRevision == profile.nativeSourceRevision,
+                    "CapabilityMissing", "Baseline metadata capacity report does not advertise the complete profile 2 preliminary contract.");
                 // The runtime performs the reservation before its first Stage
-                // call. The Editor report records that mandatory R01 contract;
-                // the runtime loader supplies any actual runtime cursor
-                // evidence and this build admission remains an estimate.
-                uint[] startingCursors = (uint[])baseline.metadataCapacityReport.cursorsAfter.Clone();
+                // call. The Editor report admits ordered identities and DLL
+                // bytes only; native page finalization remains runtime-owned.
                 var closureInputs = MetadataCapacityPlanner.ClosureInputs(request.currentCompileSnapshot, receipt, order);
-                var capacity = MetadataCapacityPlanner.Plan(profile, closureInputs, startingCursors);
-                capacity.ordinaryAssemblyCount = baseline.metadataCapacityReport.ordinaryAssemblyCount;
-                capacity.aotCandidateAssemblyCount = baseline.metadataCapacityReport.aotCandidateAssemblyCount;
-                capacity.runtimeReserveMetadataBudget = true;
-                capacity.runtimeCursorSource = "BaselineOrdinaryPlan";
-                capacity.ordinaryConsumptionIsEstimate = true;
-                MetadataCapacityPlanner.RequireFits(capacity);
+                var profileInputs = closureInputs.Select(input => new MetadataCapacityProfile2Input
+                {
+                    name = input.name,
+                    dllSize = input.dllSize,
+                    sha256 = input.sha256,
+                }).ToArray();
+                var capacity = MetadataCapacityPlannerProfile2.PreliminaryPlan(profileInputs,
+                    baseline.metadataCapacityReport2.reservedImageCountAfter);
+                capacity.nativeSourceRevision = profile.nativeSourceRevision;
+                capacity.nativeCodecHeaderSha256 = profile.nativeCodecHeaderSha256;
+                ShadowHash.Require(capacity.admissionAccepted,
+                    "MetadataCapacityExceeded", "Profile 2 preliminary metadata admission failed before publication at " +
+                    (capacity.firstFailingAssembly ?? "<unknown>") + " (index " + capacity.firstFailingIndex + ", reason " + capacity.failureReason + ").");
                 string temporary = ShadowArtifactWriter.Begin(request.outputDirectory);
                 var entries = closure.Select(name =>
                 {
@@ -136,8 +142,8 @@ namespace HybridCLR.Editor.AssemblyShadow
                     baselineResourceAbiHash = baseline.resourceAbiHash, resourceAbiHash = ResourceAbiHasher.Compute(resourceAbi), resourceChangeLevel = diff.level.ToString(),
                     dllOnly = request.dllOnly, resourceBundlesRequired = affected, resourceChangeReasons = diff.reasons,
                     changedRoots = roots, loadOrder = order, closure = entries, dependencyGraph = graph.Edges, deferredFacadeReferences = set.DeferredFacadeReferences.ToArray(),
-                    nativeBudgetCapabilityVersion = profile.nativeBudgetCapabilityVersion,
-                    metadataEncodingProfile = profile, metadataCapacityReport = capacity,
+                    nativeBudgetCapabilityVersion = MetadataCapacityProfile2.BudgetCapabilityVersion,
+                    metadataEncodingProfile2 = profile, metadataCapacityReport2 = capacity,
                 };
                 object wireManifest = SelectWireManifest(manifest, verifiedWarmup);
                 ShadowArtifactWriter.Json(temporary, "patch-manifest.json", wireManifest);

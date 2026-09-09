@@ -33,7 +33,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             Assert.That((int)AssemblyExecutionMode.InterpreterShadow, Is.EqualTo(1));
 
             ParameterInfo abi = typeof(AssemblyShadowRuntime).GetMethod("BeginTransaction").GetParameters()[3];
-            Assert.That(abi.DefaultValue, Is.EqualTo(1));
+            Assert.That(abi.DefaultValue, Is.EqualTo(2));
         }
 
         [Test]

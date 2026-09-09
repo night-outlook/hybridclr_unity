@@ -191,7 +191,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             {
                 string path = fixture.Artifact(fixture.Plan());
                 string current = File.ReadAllText(path);
-                string historical = current.Replace(",\"nativeBudgetCapabilityVersion\":0,\"metadataEncodingProfile\":null,\"metadataCapacityReport\":null", "")
+                string historical = current.Replace(",\"nativeBudgetCapabilityVersion\":0,\"metadataEncodingProfile\":null,\"metadataCapacityReport\":null,\"metadataEncodingProfile2\":null,\"metadataCapacityReport2\":null", "")
                     .Replace(",\"dllSize\":0", "");
                 Assert.AreNotEqual(current, historical);
                 fixture.Rewrite(path, historical);
@@ -279,7 +279,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
 
         [Test] public void LegacyDtoFieldInventoryAndEarlyBuilderValidationRemainSealed()
         {
-            const string fields = "schemaVersion semanticHashSchema patchId baselineBuildId baselineManifestSha256 unityVersion target architecture sourcePins runtimeAbiHash compileSnapshotHash reflectionBindingConfigurationSha256 reflectionBindingConfigurationHash reflectionBindings bootstrapAbiHash baselineResourceAbiHash resourceAbiHash resourceChangeLevel dllOnly resourceBundlesRequired resourceChangeReasons changedRoots loadOrder closure dependencyGraph deferredFacadeReferences unsigned signatureAlgorithm nativeBudgetCapabilityVersion metadataEncodingProfile metadataCapacityReport";
+            const string fields = "schemaVersion semanticHashSchema patchId baselineBuildId baselineManifestSha256 unityVersion target architecture sourcePins runtimeAbiHash compileSnapshotHash reflectionBindingConfigurationSha256 reflectionBindingConfigurationHash reflectionBindings bootstrapAbiHash baselineResourceAbiHash resourceAbiHash resourceChangeLevel dllOnly resourceBundlesRequired resourceChangeReasons changedRoots loadOrder closure dependencyGraph deferredFacadeReferences unsigned signatureAlgorithm nativeBudgetCapabilityVersion metadataEncodingProfile metadataCapacityReport metadataEncodingProfile2 metadataCapacityReport2";
             CollectionAssert.AreEqual(fields.Split(' '), typeof(ShadowPatchManifest).GetFields().Select(field => field.Name).ToArray());
             AssertCode("InvalidPatchRequest", () => ShadowPatchManifestBuilder.Build(null));
             AssertCode("InvalidPatchRequest", () => ShadowPatchManifestBuilder.BuildWithWarmup(null, new ShadowWarmupPlan()));

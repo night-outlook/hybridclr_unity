@@ -89,6 +89,60 @@ namespace HybridCLR.Editor.AssemblyShadow
             return profile;
         }
 
+        /// <summary>
+        /// Creates the current sparse signed-int32 profile only when the
+        /// installed native codec header and its pinned install receipt agree.
+        /// Profile 1 remains available to historical manifest readers, but new
+        /// baseline/patch publication must bind this profile explicitly.
+        /// </summary>
+        public static MetadataEncodingProfile2 CreateCurrentV2(ShadowSourcePins pins)
+        {
+            ShadowHash.Require(pins != null && pins.hybridclr != null && !string.IsNullOrWhiteSpace(pins.hybridclr.revision),
+                "CapabilityMissing", "Metadata profile 2 requires a pinned hybridclr source revision.");
+
+            string installedRoot = Path.Combine(SettingsUtil.LocalIl2CppDir, "libil2cpp");
+            string codecPath = Path.Combine(installedRoot, "hybridclr", "metadata", "InterpreterMetadataIndexCodec.h");
+            string receiptPath = Path.Combine(installedRoot, "assembly-shadow-install.json");
+            if (!File.Exists(codecPath) || !File.Exists(receiptPath))
+            {
+                throw new ShadowBuildException("CapabilityMissing",
+                    "Installed native sparse metadata codec is unavailable. Install the pinned native sources and regenerate native definitions before building a profile 2 baseline.");
+            }
+
+            string codecHash;
+            try { codecHash = ShadowHash.File(codecPath); }
+            catch (Exception error)
+            {
+                throw new ShadowBuildException("CapabilityMissing", "Cannot hash the installed sparse metadata codec: " + error.Message);
+            }
+
+            V2InstallReceiptEvidence receipt;
+            try { receipt = JsonUtility.FromJson<V2InstallReceiptEvidence>(File.ReadAllText(receiptPath)); }
+            catch (Exception error)
+            {
+                throw new ShadowBuildException("CapabilityMissing", "The pinned native install receipt is unreadable: " + error.Message);
+            }
+
+            bool revisionMatches = receipt != null && receipt.repositories != null && receipt.repositories.hybridclr != null &&
+                string.Equals(receipt.repositories.hybridclr.revision, pins.hybridclr.revision, StringComparison.OrdinalIgnoreCase);
+            bool codecMatches = receipt != null && (receipt.sourceFileHashes ?? new V2SourceFileHashEvidence[0]).Any(file =>
+                file != null && file.source == "hybridclr" && file.path == "hybridclr/metadata/InterpreterMetadataIndexCodec.h" &&
+                string.Equals(file.sha256, codecHash, StringComparison.OrdinalIgnoreCase));
+            if (!revisionMatches || !codecMatches)
+            {
+                throw new ShadowBuildException("CapabilityMissing",
+                    "Installed sparse metadata codec is not hash-bound to the pinned hybridclr revision. Reinstall the pinned native sources before building a profile 2 baseline.");
+            }
+
+            var profile = new MetadataEncodingProfile2
+            {
+                nativeSourceRevision = pins.hybridclr.revision,
+                nativeCodecHeaderSha256 = codecHash,
+            };
+            ShadowHash.Require(profile.IsValid(), "CapabilityMissing", "The installed sparse metadata codec did not produce a valid profile 2 identity.");
+            return profile;
+        }
+
         public void ValidateOrThrow() { Validate(this); }
 
         internal static void Validate(MetadataEncodingProfile profile)
@@ -142,6 +196,33 @@ namespace HybridCLR.Editor.AssemblyShadow
             public string path;
             public string sha256;
         }
+    }
+
+    [Serializable]
+    internal sealed class V2InstallReceiptEvidence
+    {
+        public V2InstallRepositoriesEvidence repositories;
+        public V2SourceFileHashEvidence[] sourceFileHashes;
+    }
+
+    [Serializable]
+    internal sealed class V2InstallRepositoriesEvidence
+    {
+        public V2InstallRepositoryEvidence hybridclr;
+    }
+
+    [Serializable]
+    internal sealed class V2InstallRepositoryEvidence
+    {
+        public string revision;
+    }
+
+    [Serializable]
+    internal sealed class V2SourceFileHashEvidence
+    {
+        public string source;
+        public string path;
+        public string sha256;
     }
 
     [Serializable]

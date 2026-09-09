@@ -287,8 +287,9 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 using (var module = new ModuleDefUser("Fixture.dll") { Kind = ModuleKind.Dll })
                 { var assembly = new AssemblyDefUser("Fixture", new Version(1, 0)); assembly.Modules.Add(module); module.Write(dll); }
                 var pin = new ShadowRepositoryPin { revision = new string('a', 40), url = "fixture" };
-                var pins = new ShadowSourcePins { unityVersion = Application.unityVersion, target = BuildTarget.StandaloneOSX.ToString(), architecture = "arm64", hybridclr = pin, hybridclrUnity = pin, il2cppPlus = pin, demo = pin };
-                var input = AssemblySnapshot.Capture(Path.Combine(Root, "CompilerInputs"), new[] { dll }, new string[0], "CompilePlayerScripts", BuildTarget.StandaloneOSX, "arm64", pins, new string[0]);
+                string architecture = CurrentArchitecture();
+                var pins = new ShadowSourcePins { unityVersion = Application.unityVersion, target = BuildTarget.StandaloneOSX.ToString(), architecture = architecture, hybridclr = pin, hybridclrUnity = pin, il2cppPlus = pin, demo = pin };
+                var input = AssemblySnapshot.Capture(Path.Combine(Root, "CompilerInputs"), new[] { dll }, new string[0], "CompilePlayerScripts", BuildTarget.StandaloneOSX, architecture, pins, new string[0]);
                 Directory.CreateDirectory(Path.Combine(Root, "ResourceAssemblies"));
                 File.Copy(dll, Path.Combine(Root, "ResourceAssemblies/Fixture.dll"));
                 string sourcePath = "Sources/Assets/Fixture.prefab";
@@ -300,7 +301,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 var abi = new ResourceAbiDescriptor(); var index = new ResourceScriptIndex { bundles = new[] { "fixture.bundle" } };
                 Json("resource-abi.json", abi); Json("resource-script-index.json", index);
                 Receipt = new ShadowResourceBaselineReceipt { provenance = ShadowResourceBaseline.FreshBuildProvenance, unityVersion = Application.unityVersion,
-                    target = BuildTarget.StandaloneOSX.ToString(), architecture = "arm64", compilerSnapshotHash = input.snapshotHash,
+                    target = BuildTarget.StandaloneOSX.ToString(), architecture = architecture, compilerSnapshotHash = input.snapshotHash,
                     candidateAssemblies = new[] { "Fixture" }, metadataAssemblies = new[] { new ShadowResourceProofFile { path = "ResourceAssemblies/Fixture.dll", sha256 = input.assemblies.Single().sha256 } },
                     buildMap = new ShadowResourceBuildMap { bundleDirectory = "Bundles", bundles = new[] { new ShadowBundleDefinition { name = "fixture.bundle", assets = new[] { "Assets/Fixture.prefab" } } } },
                     bundles = new[] { new ShadowBundleArtifact { name = "fixture.bundle", assets = new[] { "Assets/Fixture.prefab" }, sha256 = ShadowHash.File(Path.Combine(Root, "Bundles/fixture.bundle")) } },
@@ -309,11 +310,17 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                     resourceIndexHash = ShadowHash.File(Path.Combine(Root, "resource-script-index.json")) };
                 Seal();
             }
-            public VerifiedShadowResourceBaseline Read() { return ShadowResourceBaseline.ReadAndVerify(Root, BuildTarget.StandaloneOSX, "arm64"); }
+            public VerifiedShadowResourceBaseline Read() { return ShadowResourceBaseline.ReadAndVerify(Root, BuildTarget.StandaloneOSX, Receipt.architecture); }
             public void Reject(string expected) { Assert.AreEqual(expected, Assert.Throws<ShadowBuildException>(() => Read()).Code); }
             public void Seal() { Json(ShadowResourceBaseline.ReceiptName, Receipt); Write("manifest.sha256", ShadowHash.File(Path.Combine(Root, ShadowResourceBaseline.ReceiptName)) + "\n"); }
             public void Json(string path, object value) { Write(path, JsonUtility.ToJson(value, true)); }
             private void Write(string path, string contents) { string destination = Path.Combine(Root, path); Directory.CreateDirectory(Path.GetDirectoryName(destination)); File.WriteAllText(destination, contents, new UTF8Encoding(false)); }
+            private static string CurrentArchitecture()
+            {
+                var type = Type.GetType("UnityEditor.OSXStandalone.UserBuildSettings, UnityEditor.OSXStandalone.Extensions", true);
+                return type.GetProperty("architecture", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                    .GetValue(null, null).ToString().ToLowerInvariant();
+            }
             public void Dispose() { if (Directory.Exists(parent)) Directory.Delete(parent, true); }
         }
     }

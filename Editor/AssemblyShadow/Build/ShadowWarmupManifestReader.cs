@@ -39,7 +39,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             ShadowHash.Require(manifest != null && manifest.schemaVersion == 1 && manifest.semanticHashSchema == 1 &&
                 manifest.closure != null && manifest.loadOrder != null && manifest.closure.Length > 0 && manifest.closure.Length <= 4096 &&
                 manifest.closure.All(entry => entry != null && !string.IsNullOrWhiteSpace(entry.name)), "ManifestSchema", "Malformed base patch proof.");
-            ShadowHash.Require(manifest.nativeBudgetCapabilityVersion == 0 || manifest.nativeBudgetCapabilityVersion == 1,
+            ShadowHash.Require(manifest.nativeBudgetCapabilityVersion == 0 || manifest.nativeBudgetCapabilityVersion == 1 || manifest.nativeBudgetCapabilityVersion == 2,
                 "WarmupManifestSchema", "Unsupported metadata budget capability.");
             if (manifest.nativeBudgetCapabilityVersion == 1)
             {
@@ -49,6 +49,37 @@ namespace HybridCLR.Editor.AssemblyShadow
                     manifest.metadataCapacityReport.requiredImages == manifest.closure.Length && manifest.closure.All(entry => entry.dllSize > 0),
                     "WarmupManifestSchema", "Incomplete R01 metadata reservation contract.");
                 manifest.metadataEncodingProfile.ValidateOrThrow();
+            }
+            else if (manifest.nativeBudgetCapabilityVersion == 2)
+            {
+                ShadowHash.Require(manifest.metadataEncodingProfile2 != null && manifest.metadataCapacityReport2 != null,
+                    "WarmupManifestSchema", "Incomplete profile 2 metadata reservation contract.");
+                ShadowHash.Require(manifest.metadataEncodingProfile2.IsValid(),
+                    "WarmupManifestSchema", "Invalid profile 2 metadata encoding identity.");
+                var report = manifest.metadataCapacityReport2;
+                ShadowHash.Require(report.schemaVersion == 2 && report.profileVersion == 2 &&
+                    report.nativeBudgetCapabilityVersion == 2 && report.fitsPreliminary && report.runtimeFinalizationRequired &&
+                    !report.finalPageFitKnown && report.firstFailingIndex == -1 && report.requiredImages == manifest.closure.Length &&
+                    report.acceptedImages == manifest.closure.Length &&
+                    report.requestedImageCount == manifest.closure.Length && report.inputs != null &&
+                    report.inputs.Length == manifest.closure.Length && report.allocations != null &&
+                    report.allocations.Length == manifest.closure.Length && manifest.sourcePins != null && manifest.sourcePins.hybridclr != null &&
+                    report.nativeSourceRevision == manifest.sourcePins.hybridclr.revision &&
+                    report.nativeCodecHeaderSha256 == manifest.metadataEncodingProfile2.nativeCodecHeaderSha256,
+                    "WarmupManifestSchema", "Incomplete profile 2 preliminary metadata report.");
+                for (int index = 0; index < manifest.closure.Length; ++index)
+                {
+                    string orderedName = manifest.loadOrder[index];
+                    ShadowPatchAssembly entry = manifest.closure.Single(candidate =>
+                        AssemblyIdentityUtil.CanonicalName(candidate.name) == AssemblyIdentityUtil.CanonicalName(orderedName));
+                    MetadataCapacityProfile2Input input = report.inputs[index];
+                    MetadataCapacityProfile2Allocation allocation = report.allocations[index];
+                    ShadowHash.Require(input != null && allocation != null && input.name == orderedName && allocation.name == orderedName &&
+                        input.dllSize == entry.dllSize && allocation.dllSize == entry.dllSize && input.sha256 == entry.sha256 &&
+                        allocation.sha256 == entry.sha256 && allocation.imageId == report.reservedImageCountBefore + index + 1 &&
+                        entry.dllSize > 0 && entry.dllSize <= MetadataCapacityProfile2.MaxDllBytes,
+                        "WarmupManifestSchema", "Profile 2 preliminary metadata input order or identity differs.");
+                }
             }
             var names = manifest.closure.Select(entry => entry.name).ToArray();
             ShadowHash.Require(names.Select(AssemblyIdentityUtil.CanonicalName).Distinct(StringComparer.Ordinal).Count() == names.Length &&

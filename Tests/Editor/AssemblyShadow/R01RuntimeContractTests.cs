@@ -29,7 +29,7 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             Assert.That(json, Is.Null);
 
             ParameterInfo reserve = typeof(AssemblyShadowRuntime).GetMethod("ReserveMetadataBudget").GetParameters()[1];
-            Assert.That(reserve.DefaultValue, Is.EqualTo(1));
+            Assert.That(reserve.DefaultValue, Is.EqualTo(2));
             Assert.That(typeof(AssemblyShadowRuntime).GetMethod("GetMetadataCapacityJson").GetParameters()[0].ParameterType,
                 Is.EqualTo(typeof(long[])));
         }
@@ -87,16 +87,23 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
         {
             MethodInfo negotiate = typeof(AssemblyShadowDiagnostics).Assembly
                 .GetType("HybridCLR.AssemblyShadowRuntimeCapabilityNegotiation", true)
-                .GetMethod("Negotiate", BindingFlags.Static | BindingFlags.NonPublic);
-            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(1, 1), AssemblyShadowErrorCode.Success, false }),
+                .GetMethod("Negotiate", BindingFlags.Static | BindingFlags.NonPublic, null,
+                    new[] { typeof(string), typeof(AssemblyShadowErrorCode), typeof(bool), typeof(int) }, null);
+            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(1, 1), AssemblyShadowErrorCode.Success, false, 1 }),
                 Is.EqualTo(AssemblyShadowErrorCode.Success));
-            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(0, 0), AssemblyShadowErrorCode.Success, false }),
+            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(1, 1), AssemblyShadowErrorCode.Success, false, 2 }),
+                Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable), "Profile 2 must not run on a profile 1 player.");
+            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(2, 1), AssemblyShadowErrorCode.Success, false, 2 }),
+                Is.EqualTo(AssemblyShadowErrorCode.Success));
+            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(2, 1), AssemblyShadowErrorCode.Success, false, 1 }),
+                Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable), "Legacy profile 1 must not claim profile 2 capability.");
+            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(0, 0), AssemblyShadowErrorCode.Success, false, 1 }),
                 Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable), "Old players do not receive a new internal call.");
-            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(2, 2), AssemblyShadowErrorCode.Success, true }),
+            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(2, 2), AssemblyShadowErrorCode.Success, true, 1 }),
                 Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
-            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(0, 0), AssemblyShadowErrorCode.FeatureDisabled, false }),
+            Assert.That(negotiate.Invoke(null, new object[] { DiagnosticsJson(0, 0), AssemblyShadowErrorCode.FeatureDisabled, false, 2 }),
                 Is.EqualTo(AssemblyShadowErrorCode.FeatureDisabled));
-            Assert.That(negotiate.Invoke(null, new object[] { "{\"enabled\":true}", AssemblyShadowErrorCode.Success, false }),
+            Assert.That(negotiate.Invoke(null, new object[] { "{\"enabled\":true}", AssemblyShadowErrorCode.Success, false, 2 }),
                 Is.EqualTo(AssemblyShadowErrorCode.CapabilityUnavailable));
         }
 
