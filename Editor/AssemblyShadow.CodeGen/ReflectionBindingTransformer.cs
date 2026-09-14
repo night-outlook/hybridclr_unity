@@ -40,10 +40,21 @@ namespace HybridCLR.AssemblyShadow.CodeGen
         }
 
         public static ReflectionTransformResult Transform(byte[] pe, byte[] pdb, ReflectionBindingConfiguration configuration)
+        { return TransformCore(pe, pdb, configuration, null, false); }
+
+        public static ReflectionTransformResult Transform(byte[] pe, byte[] pdb, ReflectionBindingConfiguration configuration,
+            IEnumerable<string> compilerReferences, bool normalizeResolvedEnums = false)
+        {
+            using (var references = new CapturedCompilerReferences(compilerReferences))
+                return TransformCore(pe, pdb, configuration, references.Context, normalizeResolvedEnums);
+        }
+
+        private static ReflectionTransformResult TransformCore(byte[] pe, byte[] pdb, ReflectionBindingConfiguration configuration,
+            ModuleContext context, bool normalizeResolvedEnums)
         {
             BindingChecks.Require(configuration != null, "MissingConfiguration", "Configuration is required.");
             configuration.Validate(); string configHash = configuration.ComputeHash();
-            using (var module = Load(pe, pdb))
+            using (var module = Load(pe, pdb, context))
             {
                 RequireUnsigned(module);
                 var sites = Sites(module, configuration);
@@ -52,6 +63,8 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     "AlreadyProcessed", "Reserved guard methods already exist; reprocessing is prohibited.");
                 Guid? originalMvid = module.Mvid;
                 string points = SequencePoints(module);
+                string constants = ReflectionPdbConstants.Snapshot(module);
+                if (normalizeResolvedEnums) ReflectionPdbConstants.NormalizeResolvedEnums(module);
                 // Resolve and validate every source site before changing any body.
                 var originals = sites.Select(site => ResolveOriginalSite(module, configuration, site)).ToArray();
                 foreach (var item in originals)
@@ -79,13 +92,23 @@ namespace HybridCLR.AssemblyShadow.CodeGen
                     };
                     options.PEHeadersOptions.TimeDateStamp = 0;
                     options.MetadataOptions.Flags |= MetadataFlags.PreserveAll;
-                    module.Write(output, options);
+                    try { module.Write(output, options); }
+                    catch (Exception error)
+                    {
+                        string details;
+                        try { details = ReflectionPdbConstants.Describe(module); }
+                        catch (Exception describeError) { details = "Constant inventory unavailable: " + describeError; }
+                        throw new InvalidOperationException("Reflection binding PE/PDB emission failed; PE SHA256=" + BindingChecks.Sha256(pe) +
+                            "; PDB SHA256=" + (pdb == null ? "<absent>" : BindingChecks.Sha256(pdb)) + "\n" + details, error);
+                    }
                     var result = new ReflectionTransformResult { PeData = output.ToArray(), PdbData = symbols.ToArray(), ConfigurationHash = configHash };
-                    using (var emitted = Load(result.PeData, result.PdbData))
+                    using (var emitted = Load(result.PeData, result.PdbData, context))
                     {
                         BindingChecks.Require(emitted.Mvid == originalMvid, "MvidChanged", "Transformation must preserve the input MVID.");
                         BindingChecks.Require(emitted.PdbState != null && emitted.PdbState.PdbFileKind == PdbFileKind.PortablePDB && SequencePoints(emitted) == points,
                             "SequencePointsChanged", "Original instruction sequence points must survive portable-PDB emission.");
+                        BindingChecks.Require(ReflectionPdbConstants.Snapshot(emitted) == constants, "PdbConstantsChanged",
+                            "Original local constant names, scopes, types and values must survive portable-PDB emission.");
                         Verify(emitted, configuration);
                     }
                     BindingChecks.Require(configuration.ComputeHash() == configHash, "ConfigurationChanged", "Configuration changed during transformation.");
@@ -232,10 +255,10 @@ namespace HybridCLR.AssemblyShadow.CodeGen
             return guard;
         }
 
-        private static ModuleDefMD Load(byte[] pe, byte[] pdb)
+        private static ModuleDefMD Load(byte[] pe, byte[] pdb, ModuleContext context = null)
         {
             BindingChecks.Require(pe != null && pe.Length > 0, "MissingAssembly", "PE bytes are required.");
-            var module = ModuleDefMD.Load(pe, new ModuleCreationOptions { TryToLoadPdbFromDisk = false, PdbFileOrData = pdb != null && pdb.Length != 0 ? pdb : null });
+            var module = ModuleDefMD.Load(pe, new ModuleCreationOptions { Context = context, TryToLoadPdbFromDisk = false, PdbFileOrData = pdb != null && pdb.Length != 0 ? pdb : null });
             if (pdb != null && pdb.Length != 0 && module.PdbState == null)
             { module.Dispose(); throw new ReflectionBindingException("InvalidPdb", "Supplied symbols could not be read."); }
             return module;
