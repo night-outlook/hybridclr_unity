@@ -1,0 +1,9 @@
+GitHub Connector write-path smoke test
+
+Repository: night-outlook/hybridclr_unity
+Base branch: codex/assembly-shadow-r01b-h1
+Base commit: 0ea633a2c5b936b5af69d944593c55bd2783fca9
+Disposable branch: codex/connector-smoke-20260925-pio-7f6d2a91
+Authorization: PrimaryImplementationOwner.txt mandatory Connector write smoke test.
+Scope: transport verification only; not product acceptance or a Local Validation handoff.
+Do not merge this disposable branch. No candidate source, evidence, or handoff file is modified.
