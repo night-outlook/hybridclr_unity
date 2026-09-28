@@ -33,8 +33,16 @@ namespace HybridCLR
         [Preserve] public ulong allocationRemaps;
         [Preserve] public ulong guardFailures;
 
+        // Keep the legacy DTO's eighteen serialized fields unchanged. Unity's
+        // inline serializer cannot represent an absent nested reference. This
+        // parsed view is transient; persist the original native JSON for R02.
+        [NonSerialized, Preserve] private R02Diagnostics r02Value;
         /// <summary>Null for a legacy producer; absence never means measured zero.</summary>
-        [Preserve] public R02Diagnostics r02;
+        [Preserve] public R02Diagnostics r02
+        {
+            get { return r02Value; }
+            private set { r02Value = value; }
+        }
 
         /// <summary>Exact 33-field R02 diagnostics schema 1, independent of the outer schema.</summary>
         /// <remarks>Live counters are not a globally atomic snapshot. Coverage describes
