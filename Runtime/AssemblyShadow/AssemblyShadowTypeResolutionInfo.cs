@@ -5,7 +5,7 @@ using UnityEngine.Scripting;
 
 namespace HybridCLR
 {
-    /// <summary>The separate, strict schema 1 returned by GetTypeResolutionInfo.</summary>
+    /// <summary>Strict schema 1, optionally carrying the versioned R02 diagnostics extension.</summary>
     /// <remarks>
     /// Registry execution mode and physical image kind are independent: ordinary
     /// hot-update types may be Interpreter images without being shadow types.
@@ -33,8 +33,52 @@ namespace HybridCLR
         [Preserve] public ulong allocationRemaps;
         [Preserve] public ulong guardFailures;
 
+        /// <summary>Null for a legacy producer; absence never means measured zero.</summary>
+        [Preserve] public R02Diagnostics r02;
+
+        /// <summary>Exact 33-field R02 diagnostics schema 1, independent of the outer schema.</summary>
+        /// <remarks>Live counters are not a globally atomic snapshot. Coverage describes
+        /// bounded observation, not correctness or performance acceptance.</remarks>
+        [Serializable, Preserve]
+        public sealed class R02Diagnostics
+        {
+            [Preserve] public int schemaVersion;
+            [Preserve] public int diagnosticsLevel;
+            [Preserve] public ulong definitionSearches;
+            [Preserve] public ulong definitionRowsScanned;
+            [Preserve] public ulong admissionCacheHits;
+            [Preserve] public ulong admissionCacheMisses;
+            [Preserve] public ulong admissionProofAttempts;
+            [Preserve] public ulong admissionProofRejections;
+            [Preserve] public ulong admissionEntries;
+            [Preserve] public ulong admissionRetainedBytes;
+            [Preserve] public ulong admissionUnready;
+            [Preserve] public ulong baselineStateChecks;
+            [Preserve] public ulong fieldWorkspaceBuilds;
+            [Preserve] public ulong interfaceWorkspaceBuilds;
+            [Preserve] public ulong layoutCheckCalls;
+            [Preserve] public ulong counterpartCacheHits;
+            [Preserve] public ulong counterpartCacheMisses;
+            [Preserve] public ulong counterpartEntries;
+            [Preserve] public ulong absentCounterpartEntries;
+            [Preserve] public ulong cacheFixedBytes;
+            [Preserve] public ulong counterpartRetainedBytes;
+            [Preserve] public ulong genericContextChecks;
+            [Preserve] public ulong observationLockContentions;
+            [Preserve] public ulong observationMemoHits;
+            [Preserve] public ulong observationMemoTlsBytesPerThread;
+            [Preserve] public ulong counterStorageBytes;
+            [Preserve] public ulong counterThreadCapacity;
+            [Preserve] public ulong droppedCounterThreads;
+            [Preserve] public bool counterSaturated;
+            [Preserve] public string counterCoverage;
+            [Preserve] public string classesCoverage;
+            [Preserve] public bool memoryAccountingAvailable;
+            [Preserve] public string memoryAccountingScope;
+        }
+
         /// <summary>
-        /// Parses exactly the 18 native fields. Missing, duplicate, unknown or
+        /// Parses the 18 required native fields and only the optional known r02 object. Missing, duplicate, unknown or
         /// mistyped fields are errors, including omitted zero/false values.
         /// Unsigned counters are read directly from integer tokens without a
         /// floating-point or signed-integer intermediate.
@@ -61,7 +105,34 @@ namespace HybridCLR
             else if (!IsPointer(value.inputTypePointer) || !IsPointer(value.activeTypePointer) ||
                 (value.baselinePointerAvailable ? !IsPointer(value.baselineTypePointer) : value.baselineTypePointer.Length != 0))
                 throw Invalid("Pointer tokens and availability flags are inconsistent.");
+            if (value.r02 != null) ValidateR02(value.r02);
             return value;
+        }
+
+        private static void ValidateR02(R02Diagnostics value)
+        {
+            if (value.schemaVersion != 1 || value.diagnosticsLevel < 0 || value.diagnosticsLevel > 2 ||
+                value.counterThreadCapacity != 128 ||
+                value.memoryAccountingScope != "R02StructuresExcludingAllocatorOverhead")
+                throw Invalid("Unsupported R02 diagnostics contract.");
+            if (!Coverage(value.counterCoverage) || !Coverage(value.classesCoverage))
+                throw Invalid("Unknown R02 observation coverage.");
+            // Validate immutable profile rules, not cross-counter equalities:
+            // each native metric/flag is sampled independently during execution.
+            if (value.diagnosticsLevel == 0)
+            {
+                if (value.counterCoverage != "Disabled" || value.classesCoverage != "Disabled" ||
+                    value.memoryAccountingAvailable)
+                    throw Invalid("Disabled R02 diagnostics must report unavailable coverage.");
+            }
+            else if (value.counterCoverage == "Disabled" ||
+                (value.diagnosticsLevel == 1 ? value.classesCoverage != "Disabled" : value.classesCoverage == "Disabled"))
+                throw Invalid("R02 coverage disagrees with the compiled diagnostics profile.");
+        }
+
+        private static bool Coverage(string text)
+        {
+            return text == "Disabled" || text == "Truncated" || text == "Saturated" || text == "BoundedComplete";
         }
 
         /// <summary>Returns false and a null result for invalid JSON or schema data.</summary>
@@ -95,8 +166,8 @@ namespace HybridCLR
             return value >= 'A' && value <= 'F' ? value - 'A' + 10 : -1;
         }
 
-        // This schema is flat. A small token reader deliberately rejects nested
-        // values, numeric coercions and unknown fields instead of letting a
+        // Only the versioned r02 object may be nested. The token reader rejects
+        // arbitrary nesting, numeric coercions and unknown fields instead of letting a
         // general serializer silently manufacture defaults. It does not alter
         // the separate M03 transaction-diagnostics parser.
         private sealed class Reader
@@ -137,13 +208,70 @@ namespace HybridCLR
                             case "compositeRebuilds": result.compositeRebuilds = Unsigned(); break;
                             case "allocationRemaps": result.allocationRemaps = Unsigned(); break;
                             case "guardFailures": result.guardFailures = Unsigned(); break;
+                            case "r02": result.r02 = ReadR02(); break;
                             default: throw Invalid("Unknown type-resolution field: " + field);
                         }
                     } while (Take(','));
                     Expect('}');
                 }
                 WhiteSpace();
-                if (position != json.Length || fields.Count != 18) throw Invalid("Incomplete or trailing type-resolution JSON.");
+                if (position != json.Length || fields.Count != (result.r02 == null ? 18 : 19)) throw Invalid("Incomplete or trailing type-resolution JSON.");
+                return result;
+            }
+
+            private R02Diagnostics ReadR02()
+            {
+                var result = new R02Diagnostics();
+                var fields = new HashSet<string>(StringComparer.Ordinal);
+                Expect('{');
+                if (!Take('}'))
+                {
+                    do
+                    {
+                        string field = String();
+                        if (!fields.Add(field)) throw Invalid("Duplicate R02 diagnostics field: " + field);
+                        Expect(':');
+                        switch (field)
+                        {
+                            case "schemaVersion": result.schemaVersion = Integer(); break;
+                            case "diagnosticsLevel": result.diagnosticsLevel = Integer(); break;
+                            case "definitionSearches": result.definitionSearches = Unsigned(); break;
+                            case "definitionRowsScanned": result.definitionRowsScanned = Unsigned(); break;
+                            case "admissionCacheHits": result.admissionCacheHits = Unsigned(); break;
+                            case "admissionCacheMisses": result.admissionCacheMisses = Unsigned(); break;
+                            case "admissionProofAttempts": result.admissionProofAttempts = Unsigned(); break;
+                            case "admissionProofRejections": result.admissionProofRejections = Unsigned(); break;
+                            case "admissionEntries": result.admissionEntries = Unsigned(); break;
+                            case "admissionRetainedBytes": result.admissionRetainedBytes = Unsigned(); break;
+                            case "admissionUnready": result.admissionUnready = Unsigned(); break;
+                            case "baselineStateChecks": result.baselineStateChecks = Unsigned(); break;
+                            case "fieldWorkspaceBuilds": result.fieldWorkspaceBuilds = Unsigned(); break;
+                            case "interfaceWorkspaceBuilds": result.interfaceWorkspaceBuilds = Unsigned(); break;
+                            case "layoutCheckCalls": result.layoutCheckCalls = Unsigned(); break;
+                            case "counterpartCacheHits": result.counterpartCacheHits = Unsigned(); break;
+                            case "counterpartCacheMisses": result.counterpartCacheMisses = Unsigned(); break;
+                            case "counterpartEntries": result.counterpartEntries = Unsigned(); break;
+                            case "absentCounterpartEntries": result.absentCounterpartEntries = Unsigned(); break;
+                            case "cacheFixedBytes": result.cacheFixedBytes = Unsigned(); break;
+                            case "counterpartRetainedBytes": result.counterpartRetainedBytes = Unsigned(); break;
+                            case "genericContextChecks": result.genericContextChecks = Unsigned(); break;
+                            case "observationLockContentions": result.observationLockContentions = Unsigned(); break;
+                            case "observationMemoHits": result.observationMemoHits = Unsigned(); break;
+                            case "observationMemoTlsBytesPerThread": result.observationMemoTlsBytesPerThread = Unsigned(); break;
+                            case "counterStorageBytes": result.counterStorageBytes = Unsigned(); break;
+                            case "counterThreadCapacity": result.counterThreadCapacity = Unsigned(); break;
+                            case "droppedCounterThreads": result.droppedCounterThreads = Unsigned(); break;
+                            case "counterSaturated": result.counterSaturated = Boolean(); break;
+                            case "counterCoverage": result.counterCoverage = String(); break;
+                            case "classesCoverage": result.classesCoverage = String(); break;
+                            case "memoryAccountingAvailable": result.memoryAccountingAvailable = Boolean(); break;
+                            case "memoryAccountingScope": result.memoryAccountingScope = String(); break;
+                            default: throw Invalid("Unknown R02 diagnostics field: " + field);
+                        }
+                    } while (Take(','));
+                    Expect('}');
+                }
+                if (fields.Count != 33) throw Invalid("Incomplete R02 diagnostics object.");
                 return result;
             }
 
