@@ -1,0 +1,1 @@
+R02 batch F parser publication transport test. Not runtime acceptance.
