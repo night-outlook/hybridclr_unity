@@ -14,12 +14,17 @@ namespace HybridCLR.Editor.AssemblyShadow
         public string evidence;
     }
 
-    /// <summary>Edges point from caller to provider; a patch follows the reverse edges.</summary>
+    /// <summary>
+    /// Safety edges point from consumer to provider and include both versions.
+    /// Load edges contain only the target's actual AssemblyRef dependencies.
+    /// A cycle in the safety union is not a cycle in the target program.
+    /// </summary>
     public sealed class AssemblyReferenceGraph
     {
         private readonly Dictionary<string, AssemblyDescriptor> assemblies;
         private readonly Dictionary<string, SortedSet<string>> forward = new Dictionary<string, SortedSet<string>>(StringComparer.Ordinal);
         private readonly Dictionary<string, SortedSet<string>> reverse = new Dictionary<string, SortedSet<string>>(StringComparer.Ordinal);
+        private readonly Dictionary<string, SortedSet<string>> loadForward = new Dictionary<string, SortedSet<string>>(StringComparer.Ordinal);
         private readonly List<AssemblyDependencyEdge> edges = new List<AssemblyDependencyEdge>();
 
         public AssemblyDependencyEdge[] Edges { get { return edges.OrderBy(e => e.consumer, StringComparer.Ordinal).ThenBy(e => e.provider, StringComparer.Ordinal).ThenBy(e => e.kind, StringComparer.Ordinal).ToArray(); } }
@@ -34,13 +39,18 @@ namespace HybridCLR.Editor.AssemblyShadow
                 assemblies.Add(key, item);
                 forward.Add(key, new SortedSet<string>(StringComparer.Ordinal));
                 reverse.Add(key, new SortedSet<string>(StringComparer.Ordinal));
+                loadForward.Add(key, new SortedSet<string>(StringComparer.Ordinal));
             }
             foreach (var item in assemblies.Values.Where(IsRuntime))
                 foreach (string reference in item.references ?? new string[0])
                 {
                     string provider = AssemblyIdentityUtil.CanonicalName(reference);
                     if (assemblies.ContainsKey(provider) && IsRuntime(assemblies[provider]))
-                        AddEdge(AssemblyIdentityUtil.CanonicalName(item.name), provider, "AssemblyRef", "Compiled target assembly reference");
+                    {
+                        string consumer = AssemblyIdentityUtil.CanonicalName(item.name);
+                        AddEdge(consumer, provider, "AssemblyRef", "Compiled target assembly reference");
+                        loadForward[consumer].Add(provider);
+                    }
                 }
             MergeDeclarations(config ?? new ShadowDependencyConfiguration());
             // Deleting a declaration must not erase an unchanged baseline caller.
@@ -157,12 +167,17 @@ namespace HybridCLR.Editor.AssemblyShadow
                 ShadowHash.Require(IsRuntime(descriptor), "NonRuntimeClosure", path);
                 ShadowHash.Require(!descriptor.isBootstrap, "BootstrapInClosure", "Fixed Bootstrap cannot enter a patch: " + path);
                 ShadowHash.Require(!descriptor.isPrecompiled || descriptor.capabilityDeclared, "UndeclaredPrecompiledCapability", path);
-                ShadowHash.Require(descriptor.isShadowCapable, "NonShadowConsumer", "Non-shadow AOT consumer depends on changed shadow assembly: " + path);
+                // Ordinary hot-update has no baseline-backed Shadow identity.
+                // Even a misconfigured capability flag must not promote its role.
+                ShadowHash.Require(descriptor.classification == AssemblyClassification.Runtime && descriptor.isShadowCapable,
+                    "NonShadowConsumer", "Closure requires a baseline-backed Shadow runtime assembly (not fixed AOT or NormalHotUpdate): " + path);
                 foreach (string consumer in reverse[provider])
                     if (!parent.ContainsKey(consumer)) { parent.Add(consumer, provider); pending.Enqueue(consumer); }
             }
             string[] closure = parent.Keys.Select(key => assemblies[key].name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
-            LoadOrder(closure); // Reject cycles even if the caller only asks for closure.
+            // Do not topologically sort G_safety. Baseline A->B and target B->A
+            // form a valid temporal union. Every deploying/generating caller
+            // must separately request LoadOrder, which validates G_load.
             return closure;
         }
 
@@ -173,6 +188,12 @@ namespace HybridCLR.Editor.AssemblyShadow
             return string.Join(" -> ", result.ToArray());
         }
 
+        /// <summary>
+        /// Provider-before-consumer order for the selected target assemblies.
+        /// Baseline, reflection and resource declarations affect closure only;
+        /// they are not evidence of target loading or initializer order.
+        /// Shared by generation-plan creation/reopening and patch generation.
+        /// </summary>
         public string[] LoadOrder(IEnumerable<string> closure)
         {
             var selected = new HashSet<string>(closure.Select(AssemblyIdentityUtil.CanonicalName), StringComparer.Ordinal);
@@ -194,7 +215,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 throw new ShadowBuildException("DependencyCycle", string.Join(" -> ", stack.Skip(start).Concat(new[] { name }).Select(key => assemblies[key].name).ToArray()));
             }
             state[name] = 1; stack.Add(name);
-            foreach (string provider in forward[name]) if (selected.Contains(provider)) Visit(provider, selected, state, stack, result);
+            foreach (string provider in loadForward[name]) if (selected.Contains(provider)) Visit(provider, selected, state, stack, result);
             stack.RemoveAt(stack.Count - 1); state[name] = 2;
             result.Add(assemblies[name].name);
         }
