@@ -189,7 +189,12 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
 
         [Test] public void CyclesReportClosedPath()
         {
-            var error = Assert.Throws<ShadowBuildException>(() => new AssemblyReferenceGraph(new[] { A("A", "B"), A("B", "C"), A("C", "A") }).ReverseClosure(new[] { "A" }));
+            var graph = new AssemblyReferenceGraph(new[] { A("A", "B"), A("B", "C"), A("C", "A") });
+            // Closure is reachability, not a topological proof. The real target
+            // cycle is rejected by the separate mandatory load-order step.
+            var closure = graph.ReverseClosure(new[] { "A" });
+            CollectionAssert.AreEquivalent(new[] { "A", "B", "C" }, closure);
+            var error = Assert.Throws<ShadowBuildException>(() => graph.LoadOrder(closure));
             Assert.AreEqual("DependencyCycle", error.Code);
             StringAssert.Contains("A -> B -> C -> A", error.Message);
         }
