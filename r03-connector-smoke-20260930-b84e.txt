@@ -1,0 +1,5 @@
+Disposable GitHub Connector write/read-back smoke test for R03 entry.
+Repository: night-outlook/hybridclr_unity
+Base branch: codex/assembly-shadow-r01b-h1
+Base commit: b936a495ade1691ebb6f3bab8fdff3ef34f6f192
+Not implementation, validation, acceptance, or handoff authority.
