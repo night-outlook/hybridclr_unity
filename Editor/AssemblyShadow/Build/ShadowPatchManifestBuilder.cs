@@ -78,6 +78,12 @@ namespace HybridCLR.Editor.AssemblyShadow
                 // Warmup never authorizes a patch. It is checked only after the
                 // complete existing policy/resource proof, before any output.
                 var verifiedWarmup = warmup == null ? null : ShadowWarmupValidator.ValidateAndClone(warmup, set, closure);
+                // Resource compatibility is not native layout compatibility.
+                // Compare the actual linked baseline, not the pre-strip semantic
+                // inputs, and reject definite V1 failures before creating output.
+                var nativeLayout = NativeLayoutAdmissionSnapshot.AnalyzeAndRequire(
+                    Path.Combine(baselineRoot, baseline.playerInputSnapshot), frozenReceipt,
+                    request.currentCompileSnapshot, receipt, order);
                 // R01 capacity admission is a new capability gate. Keep it after
                 // the existing resource and compiled-policy checks so legacy
                 // rejection ordering remains observable, then fail closed for a
@@ -147,6 +153,9 @@ namespace HybridCLR.Editor.AssemblyShadow
                 };
                 object wireManifest = SelectWireManifest(manifest, verifiedWarmup);
                 ShadowArtifactWriter.Json(temporary, "patch-manifest.json", wireManifest);
+                // Versioned diagnostic sidecar; no unversioned additions to the
+                // strict legacy wire manifest, and no runtime trust in this file.
+                ShadowArtifactWriter.Json(temporary, NativeLayoutAdmissionSnapshot.ReportName, nativeLayout);
                 ShadowArtifactWriter.Json(temporary, "resource-abi.json", resourceAbi);
                 ShadowArtifactWriter.Json(temporary, "resource-abi-diff.json", diff);
                 ShadowArtifactWriter.Json(temporary, "compile-snapshot-receipt.json", receipt);
