@@ -5,6 +5,17 @@ using dnlib.DotNet;
 
 namespace HybridCLR.Editor.AssemblyShadow
 {
+    /// <summary>Immutable binding to the exact bytes loaded into a compiled set.</summary>
+    public sealed class CompiledAssemblySource
+    {
+        public string Name { get; private set; }
+        public string Path { get; private set; }
+        public string Sha256 { get; private set; }
+        public bool ReferenceOnly { get; private set; }
+        internal CompiledAssemblySource(string name, string path, string sha256, bool referenceOnly)
+        { Name = name; Path = path; Sha256 = sha256; ReferenceOnly = referenceOnly; }
+    }
+
     public sealed class CompiledAssemblySet : IDisposable
     {
         private readonly Dictionary<string, AssemblyDescriptor> _assemblies;
@@ -12,15 +23,19 @@ namespace HybridCLR.Editor.AssemblyShadow
         private readonly IResolver _resolver;
         private readonly IReadOnlyList<string> _deferredFacadeReferences;
         private bool _disposed;
+        private readonly IReadOnlyList<CompiledAssemblySource> _sources;
 
         internal CompiledAssemblySet(Dictionary<string, AssemblyDescriptor> assemblies, Dictionary<string, ModuleDefMD> modules,
-            IResolver resolver, IEnumerable<string> deferredFacadeReferences)
+            IResolver resolver, IEnumerable<string> deferredFacadeReferences, IEnumerable<CompiledAssemblySource> sources)
         {
             _assemblies = new Dictionary<string, AssemblyDescriptor>(assemblies, StringComparer.OrdinalIgnoreCase);
             _modules = new Dictionary<string, ModuleDefMD>(modules, StringComparer.OrdinalIgnoreCase);
             _resolver = resolver;
+            _sources = Array.AsReadOnly(sources.OrderBy(s => s.Name, StringComparer.Ordinal).ToArray());
             _deferredFacadeReferences = Array.AsReadOnly(ShadowHash.Sorted(deferredFacadeReferences));
         }
+
+        public IReadOnlyList<CompiledAssemblySource> Sources { get { ThrowIfDisposed(); return _sources; } }
 
         public IReadOnlyDictionary<string, AssemblyDescriptor> Assemblies { get { return _assemblies; } }
         public IReadOnlyDictionary<string, ModuleDefMD> Modules { get { return _modules; } }

@@ -63,6 +63,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             var typeResolver = new Resolver(dictionaryResolver) { ProjectWinMDRefs = false };
             ModuleContext context = new ModuleContext(dictionaryResolver, typeResolver);
 
+            var sourceBindings = new List<CompiledAssemblySource>();
             var moduleByName = new Dictionary<string, ModuleDefMD>(StringComparer.OrdinalIgnoreCase);
             var modulePathByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             try
@@ -80,7 +81,9 @@ namespace HybridCLR.Editor.AssemblyShadow
                     ShadowHash.Require(!moduleByName.ContainsKey(actualName), "DuplicateAssembly", "Duplicate assembly simple name '" + actualName + "': " + pair.Value);
                     moduleByName.Add(actualName, module);
                     modulePathByName.Add(actualName, pair.Value);
-                    dictionaryResolver.Add(module, !snapshotNames.Contains(actualName), ShadowHash.Bytes(bytes));
+                    string inputHash = ShadowHash.Bytes(bytes);
+                    dictionaryResolver.Add(module, !snapshotNames.Contains(actualName), inputHash);
+                    sourceBindings.Add(new CompiledAssemblySource(actualName, Path.GetFullPath(pair.Value), inputHash, !snapshotNames.Contains(actualName)));
                 }
 
                 // Compiler reference facades can advertise platform-specific APIs which
@@ -176,7 +179,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                         name = module.Assembly.Name.String,
                         mvid = module.Mvid == null ? string.Empty : module.Mvid.ToString(),
                         filePath = Path.GetFullPath(path),
-                        sha256 = ShadowHash.File(path),
+                        sha256 = sourceBindings.Single(input => input.Name == key).Sha256,
                         semanticHash = report.semanticHash,
                         references = module.GetAssemblyRefs().Select(r => AssemblyIdentityUtil.CanonicalName(r.Name)).Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.Ordinal).ToArray(),
                         types = module.GetTypes().Select(t => new TypeDescriptor { typeKey = AssemblyIdentityUtil.TypeKey(t), name = t.Name.String, @namespace = t.Namespace ?? string.Empty, baseType = t.BaseType == null ? string.Empty : (t.BaseType.AssemblyQualifiedName ?? t.BaseType.FullName) }).OrderBy(t => t.typeKey, StringComparer.Ordinal).ToArray(),
@@ -188,7 +191,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                     });
                 }
 
-                return new CompiledAssemblySet(descriptors, moduleByName, typeResolver, deferred);
+                return new CompiledAssemblySet(descriptors, moduleByName, typeResolver, deferred, sourceBindings);
             }
             catch
             {
