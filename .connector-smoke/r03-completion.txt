@@ -1,0 +1,3 @@
+Disposable Connector write/read-back for R03 eligibility work.
+Base: codex/assembly-shadow-r01b-h1 at 120bb01be680cec0375002a0823552d66d34b84c.
+Not runtime evidence.
