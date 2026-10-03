@@ -54,7 +54,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             var roots = AssemblyReferenceGraph.DetectChangedRoots(baseline.Assemblies.Values, target.Assemblies.Values, explicitRoots);
             var graph = new AssemblyReferenceGraph(target.Assemblies.Values, dependencies, new AssemblyReferenceGraph(baseline.Assemblies.Values, dependencies).Edges);
             var closure = graph.ReverseClosure(roots);
-            var order = graph.LoadOrder(closure); // Real target cycles still fail, even for an analysis-only report.
+            var order = graph.LoadOrder(closure);
             var selected = new HashSet<string>(closure.Select(AssemblyIdentityUtil.CanonicalName), StringComparer.Ordinal);
             foreach (var name in selected)
             {
@@ -118,7 +118,6 @@ namespace HybridCLR.Editor.AssemblyShadow
                         authorizesExpansion = false });
                 }
             }
-            // Verify the source files still match the loaded snapshot's evidence.
             var afterBindings = Bind(baseline, "baseline").Concat(Bind(target, "target")).ToArray();
             ShadowHash.Require(bindings.SequenceEqual(afterBindings), "EligibilityInputChanged", "Compilation bytes changed during analysis.");
             var bindingWriter = new CanonicalSignatureWriter();
@@ -141,14 +140,18 @@ namespace HybridCLR.Editor.AssemblyShadow
             var values = new List<string>();
             foreach (var entry in set.Assemblies.Values.OrderBy(a => AssemblyIdentityUtil.CanonicalName(a.name), StringComparer.Ordinal))
             {
-                ShadowHash.Require(!string.IsNullOrEmpty(entry.sha256) && ShadowHash.File(entry.filePath) == entry.sha256,
+                var input = set.Sources.Single(source => source.Name == AssemblyIdentityUtil.CanonicalName(entry.name));
+                ShadowHash.Require(!input.ReferenceOnly && entry.sha256 == input.Sha256 &&
+                    System.IO.Path.GetFullPath(entry.filePath) == input.Path && ShadowHash.File(input.Path) == input.Sha256,
                     "EligibilityInputChanged", "Actual DLL no longer matches its loaded descriptor: " + entry.name);
                 ShadowHash.Require(AssemblySemanticHasher.Compute(set.GetModule(entry.name)).semanticHash == entry.semanticHash,
                     "EligibilityInputChanged", "Loaded module metadata changed: " + entry.name);
+                ShadowHash.Require((entry.references ?? new string[0]).SequenceEqual(set.GetModule(entry.name).GetAssemblyRefs()
+                    .Select(reference => AssemblyIdentityUtil.CanonicalName(reference.Name)).Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal)),
+                    "EligibilityInputChanged", "Descriptor reference graph differs from loaded bytes: " + entry.name);
                 values.Add(world + "|" + set.GetModule(entry.name).Assembly.FullName + "|" + entry.sha256 + "|" +
                     entry.classification + "|shadow=" + entry.isShadowCapable + "|bootstrap=" + entry.isBootstrap);
             }
-            // Reference bytes are part of the closed resolver, not merely names/MVIDs.
             foreach (var input in set.Sources.Where(input => input.ReferenceOnly))
             {
                 ShadowHash.Require(ShadowHash.File(input.Path) == input.Sha256, "EligibilityInputChanged", "Reference bytes changed: " + input.Name);
