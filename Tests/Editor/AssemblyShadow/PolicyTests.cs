@@ -281,8 +281,8 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
             { { "mscorlib", ModuleDefMD.Load(typeof(object).Assembly.Location) } };
             var descriptors = new Dictionary<string, AssemblyDescriptor>
             { { "Consumer", new AssemblyDescriptor { name = "Consumer", classification = AssemblyClassification.EditorOnly, references = new[] { "mscorlib" } } } };
-            var constructor = typeof(CompiledAssemblySet).GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single();
-            using (var set = (CompiledAssemblySet)constructor.Invoke(new object[] { descriptors, modules, new Resolver(new AssemblyResolver()), new string[0] }))
+            using (var set = SyntheticCompiledAssemblySet.Create(descriptors, modules,
+                new Resolver(new AssemblyResolver()), new string[0]))
             {
                 var policy = new ShadowPolicyConfiguration { assemblies = new[] { new AssemblyCapability { name = "mscorlib", classification = AssemblyClassification.Reference } } };
                 Assert.That(ShadowAssemblyPolicyValidator.ValidateCompiled(set, policy, DateTime.UtcNow).IsValid, Is.True);

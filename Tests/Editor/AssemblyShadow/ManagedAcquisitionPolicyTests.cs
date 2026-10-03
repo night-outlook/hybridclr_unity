@@ -389,8 +389,8 @@ namespace HybridCLR.Editor.AssemblyShadow.Tests
                 foreach (var pair in modules.Where(pair => pair.Key != "mscorlib")) descriptors.Add(pair.Key, new AssemblyDescriptor { name = pair.Key,
                     classification = pair.Key == "Image" ? AssemblyClassification.NormalHotUpdate : AssemblyClassification.Runtime,
                     references = pair.Value.GetAssemblyRefs().Select(reference => reference.Name.String).ToArray() });
-                var constructor = typeof(CompiledAssemblySet).GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single();
-                return (CompiledAssemblySet)constructor.Invoke(new object[] { descriptors, modules, new Resolver(new AssemblyResolver()), new string[0] });
+                return SyntheticCompiledAssemblySet.Create(descriptors, modules,
+                    new Resolver(new AssemblyResolver()), new string[0]);
             }
             public void Dispose() { Set.Dispose(); if (loaderRoot != null && Directory.Exists(loaderRoot)) Directory.Delete(loaderRoot, true); }
         }
