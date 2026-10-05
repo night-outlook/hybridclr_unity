@@ -49,9 +49,28 @@ namespace HybridCLR.Editor.AssemblyShadow
             using (var baseline = ModuleDefMD.Load(baselineBytes))
             using (var target = ModuleDefMD.Load(targetBytes))
             {
+                return AnalyzeModules(baselineBytes, targetBytes, baseline, target, null, null);
+            }
+        }
+
+        /// <summary>Captured identity comparison; caller must bind both inventories to verified receipts.</summary>
+        public static NativeLayoutAdmissionReport Analyze(byte[] baselineBytes, byte[] targetBytes,
+            NativeLayoutIdentityContext baselineContext, NativeLayoutIdentityContext targetContext)
+        {
+            ShadowHash.Require(baselineBytes != null && targetBytes != null && baselineContext != null && targetContext != null,
+                "NativeLayoutInput", "Both captured identity domains are required.");
+            return AnalyzeModules(baselineBytes, targetBytes, baselineContext.Input(baselineBytes), targetContext.Input(targetBytes),
+                baselineContext.TypeKey, targetContext.TypeKey);
+        }
+
+        private static NativeLayoutAdmissionReport AnalyzeModules(byte[] baselineBytes, byte[] targetBytes, ModuleDefMD baseline,
+            ModuleDefMD target, Func<ITypeDefOrRef, string> beforeIdentity, Func<ITypeDefOrRef, string> afterIdentity)
+        {
                 ShadowHash.Require(baseline.Assembly != null && target.Assembly != null &&
                     AssemblyIdentityUtil.CanonicalName(baseline.Assembly.Name) == AssemblyIdentityUtil.CanonicalName(target.Assembly.Name),
                     "NativeLayoutInput", "V1 compares the same baseline-backed logical assembly.");
+                if (beforeIdentity != null) ShadowHash.Require(AssemblyNameComparer.CompareAll.Equals(baseline.Assembly, target.Assembly),
+                    "NativeLayoutInput", "Captured comparison cannot conflate different full assembly identities.");
                 var before = Index(baseline);
                 var after = Index(target);
                 var rows = new List<NativeLayoutTypeAdmission>();
@@ -64,15 +83,14 @@ namespace HybridCLR.Editor.AssemblyShadow
                             prePublicationNativeProofRequired = false, reasons = new[] { "Added type in an existing assembly; native capability, resources and allocation guards still apply." } });
                         continue;
                     }
-                    rows.Add(Compare(oldType, pair.Value));
+                    rows.Add(Compare(oldType, pair.Value, beforeIdentity, afterIdentity));
                 }
                 foreach (var pair in before.Where(p => !after.ContainsKey(p.Key)).OrderBy(p => p.Key, StringComparer.Ordinal))
                     rows.Add(new NativeLayoutTypeAdmission { typeKey = pair.Key, decision = "NoActiveCounterpart", metadataChanged = true,
                         prePublicationNativeProofRequired = false, reasons = new[] { "Old type lookup/execution must reject; this is not assembly Remove support or resource compatibility." } });
-                return new NativeLayoutAdmissionReport { assembly = target.Assembly.Name, baselineDllSha256 = ShadowHash.Bytes(baselineBytes),
+                return new NativeLayoutAdmissionReport { schemaVersion = beforeIdentity == null ? 1 : 2, assembly = target.Assembly.Name, baselineDllSha256 = ShadowHash.Bytes(baselineBytes),
                     targetDllSha256 = ShadowHash.Bytes(targetBytes), editorAccepted = rows.All(r => r.decision != "Rejected"),
                     nativeProofExecuted = false, pureInterpreterExpansionEnabled = false, types = rows.ToArray() };
-            }
         }
 
         private static Dictionary<string, TypeDef> Index(ModuleDef module)
@@ -89,16 +107,17 @@ namespace HybridCLR.Editor.AssemblyShadow
             return result;
         }
 
-        private static NativeLayoutTypeAdmission Compare(TypeDef baseline, TypeDef target)
+        private static NativeLayoutTypeAdmission Compare(TypeDef baseline, TypeDef target,
+            Func<ITypeDefOrRef, string> beforeIdentity, Func<ITypeDefOrRef, string> afterIdentity)
         {
             var rejected = new List<string>();
             var proof = new List<string>();
             if (Kind(baseline) != Kind(target)) rejected.Add("TypeKindChanged");
             if (EvolutionSignature.DeclarationKey(baseline) != EvolutionSignature.DeclarationKey(target)) rejected.Add("DeclarationArityChanged");
             if (IsByRefLike(baseline) != IsByRefLike(target)) rejected.Add("ByRefLikeChanged");
-            if (EvolutionSignature.Type(baseline.BaseType) != EvolutionSignature.Type(target.BaseType)) rejected.Add("ParentChanged");
-            if (!Interfaces(baseline).SequenceEqual(Interfaces(target))) rejected.Add("InterfacesChanged");
-            if (EvolutionSignature.Constraints(baseline.GenericParameters) != EvolutionSignature.Constraints(target.GenericParameters)) rejected.Add("GenericConstraintsChanged");
+            if (EvolutionSignature.Type(baseline.BaseType, beforeIdentity) != EvolutionSignature.Type(target.BaseType, afterIdentity)) rejected.Add("ParentChanged");
+            if (!Interfaces(baseline, beforeIdentity).SequenceEqual(Interfaces(target, afterIdentity))) rejected.Add("InterfacesChanged");
+            if (EvolutionSignature.Constraints(baseline.GenericParameters, beforeIdentity) != EvolutionSignature.Constraints(target.GenericParameters, afterIdentity)) rejected.Add("GenericConstraintsChanged");
             if ((baseline.Attributes & TypeAttributes.LayoutMask) != (target.Attributes & TypeAttributes.LayoutMask)) rejected.Add("LayoutKindChanged");
             if (baseline.PackingSize != target.PackingSize) proof.Add("EffectiveNativePackingRequired");
             if (baseline.ClassSize != target.ClassSize) proof.Add("NativeInstanceSizeRequired");
@@ -109,7 +128,7 @@ namespace HybridCLR.Editor.AssemblyShadow
             for (int i = 0; i < Math.Min(oldFields.Length, newFields.Length); ++i)
             {
                 var oldField = oldFields[i]; var newField = newFields[i];
-                if (oldField.Name != newField.Name || EvolutionSignature.Signature(oldField.FieldType) != EvolutionSignature.Signature(newField.FieldType))
+                if (oldField.Name != newField.Name || EvolutionSignature.Signature(oldField.FieldType, beforeIdentity) != EvolutionSignature.Signature(newField.FieldType, afterIdentity))
                     rejected.Add("InstanceFieldOrderOrSignatureChanged:" + oldField.Name);
                 if (oldField.FieldOffset != newField.FieldOffset)
                 {
@@ -145,8 +164,8 @@ namespace HybridCLR.Editor.AssemblyShadow
         }
         private static bool IsByRefLike(TypeDef type)
         { return type.CustomAttributes.Any(a => a.AttributeType != null && a.AttributeType.FullName == "System.Runtime.CompilerServices.IsByRefLikeAttribute"); }
-        private static string[] Interfaces(TypeDef type)
-        { return type.Interfaces.Select(i => EvolutionSignature.Type(i.Interface)).OrderBy(s => s, StringComparer.Ordinal).ToArray(); }
+        private static string[] Interfaces(TypeDef type, Func<ITypeDefOrRef, string> identity)
+        { return type.Interfaces.Select(i => EvolutionSignature.Type(i.Interface, identity)).OrderBy(s => s, StringComparer.Ordinal).ToArray(); }
         private static bool PrivatePrimitive(TypeSig type)
         {
             switch (type.ElementType)
