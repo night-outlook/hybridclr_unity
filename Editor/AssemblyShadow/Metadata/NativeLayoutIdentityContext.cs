@@ -157,7 +157,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                     "NativeLayoutResolutionScope", "Unsupported or foreign module scope: " + type.FullName);
                 scope = assembly != null ? (IAssembly)assembly : module.Assembly;
             }
-            string declaration = Declaration(chain[0].Namespace.String, chain.Select(t => t.Name.String));
+            string declaration = Declaration(chain[0].Namespace, chain.Select(t => t.Name.String));
             var path = new List<string>();
             Image origin = null;
             ShadowHash.Require(scope != null && images.TryGetValue(scope.FullName, out origin), "NativeLayoutResolutionMissingAssembly", scope == null ? type.FullName : scope.FullName);
@@ -214,7 +214,7 @@ namespace HybridCLR.Editor.AssemblyShadow
                 foreach (var type in image.module.GetTypes())
                 {
                     var chain = Chain(type);
-                    string declaration = Declaration(chain[0].Namespace.String, chain.Select(t => t.Name.String));
+                    string declaration = Declaration(chain[0].Namespace, chain.Select(t => t.Name.String));
                     ShadowHash.Require(!image.definitions.ContainsKey(declaration), "NativeLayoutResolutionAmbiguous", declaration);
                     image.definitions.Add(declaration, type);
                 }
