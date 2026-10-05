@@ -191,13 +191,60 @@ namespace HybridCLR.Editor.AssemblyShadow
                     });
                 }
 
-                return new CompiledAssemblySet(descriptors, moduleByName, typeResolver, deferred, sourceBindings);
+                return new CompiledAssemblySet(descriptors, moduleByName, typeResolver, deferred, sourceBindings, targetFrameworkReferences);
             }
             catch
             {
                 foreach (ModuleDefMD module in moduleByName.Values)
                     try { module.Dispose(); } catch (Exception) { }
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Independent replay of the SAME captured input list and resolver policy.
+        /// All images are registered before semantic decoding. This deliberately
+        /// does not reopen one reference in an ambient/empty resolution context.
+        /// It reads no directories, GAC, or unlisted fallback assemblies.
+        /// </summary>
+        internal static VerificationDomain LoadVerificationDomain(IReadOnlyList<CompiledAssemblySource> sources,
+            VerifiedTargetFrameworkReferences frameworkReferences)
+        {
+            ShadowHash.Require(sources != null && sources.Count > 0, "EligibilityInputChanged", "Missing loaded input bindings.");
+            var assemblies = new DictionaryAssemblyResolver(frameworkReferences);
+            var resolver = new Resolver(assemblies) { ProjectWinMDRefs = false };
+            var context = new ModuleContext(assemblies, resolver);
+            var result = new VerificationDomain();
+            try
+            {
+                foreach (var source in sources)
+                {
+                    byte[] bytes = File.ReadAllBytes(source.Path);
+                    ShadowHash.Require(ShadowHash.Bytes(bytes) == source.Sha256,
+                        "EligibilityInputChanged", "Replay input bytes changed: " + source.Name);
+                    var module = ModuleDefMD.Load(bytes, context);
+                    try
+                    {
+                        module.EnableTypeDefFindCache = true;
+                        ShadowHash.Require(AssemblyName(module, source.Path) == source.Name && !result.Modules.ContainsKey(source.Name),
+                            "EligibilityInputChanged", "Replay input identity/membership changed: " + source.Name);
+                        assemblies.Add(module, source.ReferenceOnly, source.Sha256);
+                        result.Modules.Add(source.Name, module);
+                    }
+                    catch { module.Dispose(); throw; }
+                }
+                return result;
+            }
+            catch { result.Dispose(); throw; }
+        }
+
+        internal sealed class VerificationDomain : IDisposable
+        {
+            internal readonly Dictionary<string, ModuleDefMD> Modules = new Dictionary<string, ModuleDefMD>(StringComparer.OrdinalIgnoreCase);
+            public void Dispose()
+            {
+                foreach (var module in Modules.Values) module.Dispose();
+                Modules.Clear();
             }
         }
 

@@ -24,15 +24,31 @@ namespace HybridCLR.Editor.AssemblyShadow
         private readonly IReadOnlyList<string> _deferredFacadeReferences;
         private bool _disposed;
         private readonly IReadOnlyList<CompiledAssemblySource> _sources;
+        private readonly VerifiedTargetFrameworkReferences _targetFrameworkReferences;
 
         internal CompiledAssemblySet(Dictionary<string, AssemblyDescriptor> assemblies, Dictionary<string, ModuleDefMD> modules,
             IResolver resolver, IEnumerable<string> deferredFacadeReferences, IEnumerable<CompiledAssemblySource> sources)
+            : this(assemblies, modules, resolver, deferredFacadeReferences, sources, null) { }
+
+        internal CompiledAssemblySet(Dictionary<string, AssemblyDescriptor> assemblies, Dictionary<string, ModuleDefMD> modules,
+            IResolver resolver, IEnumerable<string> deferredFacadeReferences, IEnumerable<CompiledAssemblySource> sources,
+            VerifiedTargetFrameworkReferences targetFrameworkReferences)
         {
+            _targetFrameworkReferences = targetFrameworkReferences;
             _assemblies = new Dictionary<string, AssemblyDescriptor>(assemblies, StringComparer.OrdinalIgnoreCase);
             _modules = new Dictionary<string, ModuleDefMD>(modules, StringComparer.OrdinalIgnoreCase);
             _resolver = resolver;
             _sources = Array.AsReadOnly(sources.OrderBy(s => s.Name, StringComparer.Ordinal).ToArray());
             _deferredFacadeReferences = Array.AsReadOnly(ShadowHash.Sorted(deferredFacadeReferences));
+        }
+
+        // The five-argument synthetic fixture constructor remains intact. Only
+        // the production loader supplies the immutable verified resolver policy.
+        // Replay owns a separate complete domain; no loaded/mutable resolver is reused.
+        internal DnlibAssemblyLoader.VerificationDomain ReloadForVerification()
+        {
+            ThrowIfDisposed();
+            return DnlibAssemblyLoader.LoadVerificationDomain(_sources, _targetFrameworkReferences);
         }
 
         public IReadOnlyList<CompiledAssemblySource> Sources { get { ThrowIfDisposed(); return _sources; } }

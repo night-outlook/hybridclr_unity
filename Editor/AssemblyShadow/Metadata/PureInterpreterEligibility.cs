@@ -138,29 +138,54 @@ namespace HybridCLR.Editor.AssemblyShadow
         private static string[] Bind(CompiledAssemblySet set, string world)
         {
             var values = new List<string>();
-            foreach (var entry in set.Assemblies.Values.OrderBy(a => AssemblyIdentityUtil.CanonicalName(a.name), StringComparer.Ordinal))
+            // A byte-identical reference can decode differently in an empty
+            // ModuleContext (notably enum-valued custom attributes). Replay all
+            // exact inputs in an independent closed domain with the original
+            // verified framework policy, then compare complete semantic reports.
+            // This retains BOTH disk-byte and in-memory mutation detection.
+            using (var replay = set.ReloadForVerification())
             {
-                var input = set.Sources.Single(source => source.Name == AssemblyIdentityUtil.CanonicalName(entry.name));
-                ShadowHash.Require(!input.ReferenceOnly && entry.sha256 == input.Sha256 &&
-                    System.IO.Path.GetFullPath(entry.filePath) == input.Path && ShadowHash.File(input.Path) == input.Sha256,
-                    "EligibilityInputChanged", "Actual DLL no longer matches its loaded descriptor: " + entry.name);
-                ShadowHash.Require(AssemblySemanticHasher.Compute(set.GetModule(entry.name)).semanticHash == entry.semanticHash,
-                    "EligibilityInputChanged", "Loaded module metadata changed: " + entry.name);
-                ShadowHash.Require((entry.references ?? new string[0]).SequenceEqual(set.GetModule(entry.name).GetAssemblyRefs()
-                    .Select(reference => AssemblyIdentityUtil.CanonicalName(reference.Name)).Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal)),
-                    "EligibilityInputChanged", "Descriptor reference graph differs from loaded bytes: " + entry.name);
-                values.Add(world + "|" + set.GetModule(entry.name).Assembly.FullName + "|" + entry.sha256 + "|" +
-                    entry.classification + "|shadow=" + entry.isShadowCapable + "|bootstrap=" + entry.isBootstrap);
-            }
-            foreach (var input in set.Sources.Where(input => input.ReferenceOnly))
-            {
-                ShadowHash.Require(ShadowHash.File(input.Path) == input.Sha256, "EligibilityInputChanged", "Reference bytes changed: " + input.Name);
-                using (var original = ModuleDefMD.Load(System.IO.File.ReadAllBytes(input.Path)))
-                    ShadowHash.Require(AssemblySemanticHasher.Compute(original).semanticHash == AssemblySemanticHasher.Compute(set.GetModule(input.Name)).semanticHash,
-                        "EligibilityInputChanged", "Loaded reference metadata changed: " + input.Name);
-                values.Add(world + "|reference|" + set.GetModule(input.Name).Assembly.FullName + "|" + input.Sha256);
+                ShadowHash.Require(set.Modules.Count == replay.Modules.Count &&
+                    set.Modules.Keys.OrderBy(n => n, StringComparer.Ordinal).SequenceEqual(replay.Modules.Keys.OrderBy(n => n, StringComparer.Ordinal)),
+                    "EligibilityInputChanged", "Loaded metadata domain membership changed: " + world);
+                foreach (var entry in set.Assemblies.Values.OrderBy(a => AssemblyIdentityUtil.CanonicalName(a.name), StringComparer.Ordinal))
+                {
+                    var input = set.Sources.Single(source => source.Name == AssemblyIdentityUtil.CanonicalName(entry.name));
+                    ShadowHash.Require(!input.ReferenceOnly && entry.sha256 == input.Sha256 &&
+                        System.IO.Path.GetFullPath(entry.filePath) == input.Path && ShadowHash.File(input.Path) == input.Sha256,
+                        "EligibilityInputChanged", "Actual DLL no longer matches its loaded descriptor: " + entry.name);
+                    var expected = AssemblySemanticHasher.Compute(replay.Modules[input.Name]);
+                    RequireSemanticAgreement(expected, AssemblySemanticHasher.Compute(set.GetModule(entry.name)), world + ":" + entry.name);
+                    ShadowHash.Require(expected.semanticHash == entry.semanticHash,
+                        "EligibilityInputChanged", "Descriptor metadata differs from captured bytes: " + entry.name);
+                    ShadowHash.Require((entry.references ?? new string[0]).SequenceEqual(set.GetModule(entry.name).GetAssemblyRefs()
+                        .Select(reference => AssemblyIdentityUtil.CanonicalName(reference.Name)).Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal)),
+                        "EligibilityInputChanged", "Descriptor reference graph differs from loaded bytes: " + entry.name);
+                    values.Add(world + "|" + set.GetModule(entry.name).Assembly.FullName + "|" + entry.sha256 + "|" +
+                        entry.classification + "|shadow=" + entry.isShadowCapable + "|bootstrap=" + entry.isBootstrap);
+                }
+                foreach (var input in set.Sources.Where(input => input.ReferenceOnly))
+                {
+                    ShadowHash.Require(ShadowHash.File(input.Path) == input.Sha256, "EligibilityInputChanged", "Reference bytes changed: " + input.Name);
+                    RequireSemanticAgreement(AssemblySemanticHasher.Compute(replay.Modules[input.Name]),
+                        AssemblySemanticHasher.Compute(set.GetModule(input.Name)), world + ":reference:" + input.Name);
+                    values.Add(world + "|reference|" + set.GetModule(input.Name).Assembly.FullName + "|" + input.Sha256);
+                }
             }
             return values.ToArray();
+        }
+
+        private static void RequireSemanticAgreement(SemanticHashReport expected, SemanticHashReport observed, string label)
+        {
+            if (expected.semanticHash == observed.semanticHash) return;
+            var differences = new List<string>();
+            if (expected.sections.identity != observed.sections.identity) differences.Add("identity");
+            if (expected.sections.types != observed.sections.types) differences.Add("types");
+            if (expected.sections.methods != observed.sections.methods) differences.Add("methods");
+            if (expected.sections.attributes != observed.sections.attributes) differences.Add("attributes");
+            if (expected.sections.resources != observed.sections.resources) differences.Add("resources");
+            throw new ShadowBuildException("EligibilityInputChanged", "Loaded metadata differs from ClosedMetadataReplayV1: " + label +
+                "; sections=" + string.Join(",", differences.ToArray()) + "; expected=" + expected.semanticHash + "; observed=" + observed.semanticHash);
         }
 
         private static void InspectConsumers(CompiledAssemblySet set, HashSet<string> selected, string world,
