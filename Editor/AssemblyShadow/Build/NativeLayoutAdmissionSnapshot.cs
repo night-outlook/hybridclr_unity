@@ -155,7 +155,7 @@ namespace HybridCLR.Editor.AssemblyShadow
         {
             string path = ShadowHash.SafeChild(root, relative);
             for (string at = Path.GetFullPath(path); at != null; at = Path.GetDirectoryName(at))
-                ShadowHash.Require((File.GetAttributes(at) & FileAttributes.ReparsePoint) == 0, "NativeLayoutResolutionPath", "No linked input paths: " + at);
+                ShadowHash.Require((File.GetAttributes(at) & System.IO.FileAttributes.ReparsePoint) == 0, "NativeLayoutResolutionPath", "No linked input paths: " + at);
             return path;
         }
     }
