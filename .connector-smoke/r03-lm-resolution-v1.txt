@@ -1,0 +1,1 @@
+Disposable LM Connector tree/commit/ref smoke test. Base c86cbf665f5fcb2137e5adf2960541ce492467a4. Not implementation or acceptance evidence.
