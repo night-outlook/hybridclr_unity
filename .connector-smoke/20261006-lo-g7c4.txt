@@ -1,0 +1,4 @@
+Disposable GitHub Connector tree/commit/ref smoke test for R03 LO continuation.
+Repository: night-outlook/hybridclr_unity
+Base: 948c0e3b4f8891481301770115e8ba4945eea6de
+No product acceptance or active branch change.
