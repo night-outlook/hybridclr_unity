@@ -1,0 +1,6 @@
+GitHub Connector smoke-test marker (disposable; never merge).
+Repository: night-outlook/hybridclr_unity
+Base branch: codex/assembly-shadow-r01b-h1
+Base HEAD: 948c0e3b4f8891481301770115e8ba4945eea6de
+Smoke branch: codex/connector-smoke-primary-20261015-6c928f
+Purpose: verify remote commit and exact branch HEAD readback only.
