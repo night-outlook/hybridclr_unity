@@ -1,0 +1,6 @@
+GitHub Connector write smoke test only.
+Repository: night-outlook/hybridclr_unity
+Base: codex/assembly-shadow-r01b-h1
+Base SHA: 948c0e3b4f8891481301770115e8ba4945eea6de
+Disposable branch: codex/owner-connector-smoke-20261019-346e8a
+This file is not product or validation evidence.
