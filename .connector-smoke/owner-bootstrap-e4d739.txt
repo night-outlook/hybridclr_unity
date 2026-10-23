@@ -1,0 +1,6 @@
+Temporary GitHub Connector write/read-back smoke test.
+Repository: night-outlook/hybridclr_unity
+Feature branch: codex/assembly-shadow-r01b-h1
+Base commit: 948c0e3b4f8891481301770115e8ba4945eea6de
+Marker: owner-bootstrap-e4d739
+This file must not be merged or used as validation evidence.
