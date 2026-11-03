@@ -1,0 +1,6 @@
+Disposable GitHub Connector write smoke test.
+Repository: night-outlook/hybridclr_unity
+Base ref: codex/assembly-shadow-r01b-h1
+Base commit: 948c0e3b4f8891481301770115e8ba4945eea6de
+Smoke branch: codex/assembly-shadow-smoke-20261102-primary-bootstrap-51b8
+Do not merge. Safe to delete branch after verification.
