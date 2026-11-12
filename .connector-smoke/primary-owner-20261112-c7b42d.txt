@@ -1,0 +1,5 @@
+Disposable GitHub Connector write smoke test for Primary Implementation Owner.
+Repository: night-outlook/hybridclr_unity
+Base: codex/assembly-shadow-r01b-h1@948c0e3b4f8891481301770115e8ba4945eea6de
+Date: 2026-11-12
+Disposable branch only; no product code changes.
